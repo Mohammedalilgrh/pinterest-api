@@ -1,0 +1,6 @@
+node_modules/
+.git/
+*.log
+README.md.backup
+eng.traineddata
+pinterest_auth.json
