@@ -87,128 +87,155 @@ async function loginToPinterest() {
 // Pinterest Search
 // ──────────────────────────────────────────────
 
-const RANDOM_WORDS = [
-  'daily','best','top','trending','popular','amazing','beautiful','cool',
-  'awesome','epic','great','wonderful','fantastic','incredible','perfect',
-  'stunning','gorgeous','lovely','nice','super','mega','ultra','fresh',
-  'new','hot','viral','modern','classic','unique','special','premium',
+// HUGE pool of real search terms — every combination returns real Pinterest results
+const RELATED_TERMS = [
+  'aesthetic','art','beautiful','best','bold','bright','calm','chill','classic',
+  'cool','creative','cute','daily','deep','dream','epic','famous','fantastic',
+  'free','fresh','funny','glow','golden','good','gorgeous','great','happy',
+  'hard','healthy','heart','heaven','holy','honest','hope','hot','humble',
+  'iconic','ideal','inspired','intense','kind','legendary','light','lit',
+  'lovely','lucky','magic','mega','minimal','modern','mood','motivated',
+  'natural','neat','new','nice','noble','open','peace','perfect','positive',
+  'power','pro','pure','quiet','radiant','rare','raw','real','rich','royal',
+  'sacred','safe','savage','serene','sharp','shine','short','simple','sincere',
+  'sleek','smart','smooth','soft','solid','soul','spark','spiritual','star',
+  'steady','stellar','still','striking','strong','stunning','subtle','sugar',
+  'sunny','super','supreme','sweet','swift','tender','thought','tough','true',
+  'trust','ultimate','unique','united','vibes','vibrant','viral','vivid',
+  'warm','wholesome','wild','wise','wonder','worthy','zen',
 ];
 
+let searchCounter = Date.now();
+let lastPickedIndex = -1;
+
 function buildFreshQuery(query) {
-  // Sprinkle random unique garbage to force Pinterest to serve different results
-  // Pinterest treats "quotes x7k2" as a different search from "quotes m9p1"
-  const suffix = Math.random().toString(36).substring(2, 6);
-  const word = RANDOM_WORDS[Math.floor(Math.random() * RANDOM_WORDS.length)];
-  return `${query} ${word} ${suffix}`;
+  // NEVER let Pinterest see the same query twice.
+  // We use the user's query as the niche, then append a real word that
+  // Pinterest actually has results for - plus a rotating timestamp.
+
+  // Pick a word different from the last one
+  let idx;
+  do {
+    idx = Math.floor(Math.random() * RELATED_TERMS.length);
+  } while (idx === lastPickedIndex && RELATED_TERMS.length > 1);
+  lastPickedIndex = idx;
+
+  const word = RELATED_TERMS[idx];
+  searchCounter++;
+
+  // Pinterest treats "quotes" as the main query and ignores extra text
+  // But the unique number forces Pinterest's CDN to serve fresh results
+  // instead of returning cached JSON
+  return `${query} ${word} ${searchCounter}`;
 }
 
-async function searchPinterest(query, limit = 10, bookmark = null, pageNum = 1) {
+// Track seen pin IDs to avoid duplicates across requests in the same session
+const seenPinIds = new Set();
+let sessionFreshnessCounter = 0;
+
+async function searchPinterest(query, limit = 10, bookmark = null) {
   const maxResults = Math.min(limit, 50);
-  const allPins = [];
+  let allPins = [];
   let nextBookmark = null;
 
-  // Build the ACTUAL Pinterest search query with freshness injection
-  // The user query is the niche, but we add noise so every request is different
-  const freshPinterestQuery = buildFreshQuery(query);
+  // Try up to 3 times with different queries if we keep getting seen pins
+  for (let attempt = 0; attempt < 3 && allPins.length < maxResults; attempt++) {
+    // Build the ACTUAL Pinterest search query with freshness injection
+    const freshPinterestQuery = buildFreshQuery(query);
 
-  let browser;
-  try {
-    browser = await chromium.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-    });
+    let browser;
+    try {
+      browser = await chromium.launch({
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+      });
 
-    const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-      viewport: { width: 1920, height: 1080 },
-    });
+      const context = await browser.newContext({
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+        viewport: { width: 1920, height: 1080 },
+      });
 
-    // Load saved cookies
-    if (fs.existsSync(STATE_FILE)) {
-      try {
-        const cookies = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-        await context.addCookies(cookies);
-      } catch (e) {}
-    }
-
-    const page = await context.newPage();
-
-    // Intercept Pinterest's internal API to capture search responses
-    page.on('response', async (response) => {
-      const url = response.url();
-      if (url.includes('BaseSearchResource/get') && response.status() === 200) {
+      // Load saved cookies
+      if (fs.existsSync(STATE_FILE)) {
         try {
-          const json = await response.json();
-          const resourceData = json?.resource_response?.data;
-          const results = resourceData?.results || [];
-
-          // Capture the bookmark for pagination
-          if (resourceData?.bookmark) {
-            nextBookmark = resourceData.bookmark;
-          }
-
-          for (const pin of results) {
-            if (allPins.length >= maxResults) break;
-            let image = pin.images?.orig?.url || pin.images?.['564x']?.url || pin.images?.['736x']?.url || pin.images?.['236x']?.url || '';
-            allPins.push({
-              id: pin.id || '',
-              title: pin.title || pin.grid_title || '',
-              description: pin.description || pin.pin_description || '',
-              image,
-              link: pin.link || `https://www.pinterest.com/pin/${pin.id}/`,
-            });
-          }
+          const cookies = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+          await context.addCookies(cookies);
         } catch (e) {}
       }
-    });
 
-    // Build search URL with optional bookmark for pagination
-    // Use the FRESHENED query so Pinterest never caches
-    let searchUrl = `https://www.pinterest.com/search/pins/?q=${encodeURIComponent(freshPinterestQuery)}&rs=typed`;
-    if (bookmark) {
-      searchUrl += `&bookmark=${encodeURIComponent(bookmark)}`;
-    }
+      const page = await context.newPage();
+      let attemptPins = [];
 
-    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
-    await page.waitForTimeout(4000);
+      // Intercept Pinterest's internal API to capture search responses
+      page.on('response', async (response) => {
+        const url = response.url();
+        if (url.includes('BaseSearchResource/get') && response.status() === 200) {
+          try {
+            const json = await response.json();
+            const resourceData = json?.resource_response?.data;
+            const results = resourceData?.results || [];
 
-    // Scroll to load more pins
-    const scrollsToDo = pageNum > 1 && !bookmark ? Math.min(pageNum * 2, 15) : 5;
-    for (let i = 0; i < scrollsToDo && allPins.length < maxResults; i++) {
-      await page.evaluate(() => window.scrollBy(0, 800));
-      await page.waitForTimeout(1500);
-    }
+            // Capture the bookmark for pagination
+            if (resourceData?.bookmark) {
+              nextBookmark = resourceData.bookmark;
+            }
 
-    // If API interception didn't work, try extracting from DOM
-    if (allPins.length === 0) {
-      console.log('API interception empty, trying DOM extraction...');
-      const domPins = await page.evaluate((maxRes) => {
-        const pins = [];
-        const images = document.querySelectorAll('img[src*="pinimg"]');
-        for (const img of images) {
-          if (pins.length >= maxRes) break;
-          const link = img.closest('a');
-          pins.push({
-            id: '',
-            title: img.alt || '',
-            description: '',
-            image: img.src || '',
-            link: link ? (link.href.startsWith('http') ? link.href : 'https://www.pinterest.com' + link.href) : '',
-          });
+            for (const pin of results) {
+              if (attemptPins.length >= maxResults * 2) break;
+              let image = pin.images?.orig?.url || pin.images?.['564x']?.url || pin.images?.['736x']?.url || pin.images?.['236x']?.url || '';
+              attemptPins.push({
+                id: pin.id || '',
+                title: pin.title || pin.grid_title || '',
+                description: pin.description || pin.pin_description || '',
+                image,
+                link: pin.link || `https://www.pinterest.com/pin/${pin.id}/`,
+              });
+            }
+          } catch (e) {}
         }
-        return pins;
-      }, maxResults);
-      allPins.push(...domPins);
-    }
+      });
 
-    await context.close();
-    await browser.close();
-    return { pins: allPins.slice(0, maxResults), bookmark: nextBookmark };
-  } catch (err) {
-    console.error('Search error:', err.message);
-    if (browser) await browser.close().catch(() => {});
-    return { pins: allPins, bookmark: nextBookmark };
+      // Build search URL
+      let searchUrl = `https://www.pinterest.com/search/pins/?q=${encodeURIComponent(freshPinterestQuery)}&rs=typed`;
+      if (bookmark) {
+        searchUrl += `&bookmark=${encodeURIComponent(bookmark)}`;
+      }
+
+      await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
+      await page.waitForTimeout(5000);
+
+      // Scroll to load more pins
+      for (let i = 0; i < 5 && attemptPins.length < maxResults; i++) {
+        await page.evaluate(() => window.scrollBy(0, 800));
+        await page.waitForTimeout(1500);
+      }
+
+      await context.close();
+      await browser.close();
+
+      // Filter out already-seen pins
+      for (const pin of attemptPins) {
+        if (allPins.length >= maxResults) break;
+        if (pin.id && !seenPinIds.has(pin.id)) {
+          seenPinIds.add(pin.id);
+          allPins.push(pin);
+        }
+      }
+
+      console.log(`Attempt ${attempt + 1}: got ${attemptPins.length} pins, ${allPins.length} new`);
+    } catch (err) {
+      console.error(`Search attempt ${attempt + 1} error:`, err.message);
+      if (browser) await browser.close().catch(() => {});
+    }
   }
+
+  // Clear seen IDs periodically so memory doesn't grow forever (~200KB per 5000 IDs)
+  if (seenPinIds.size > 5000) {
+    seenPinIds.clear();
+    console.log('Cleared seen pin cache (5000 limit reached)');
+  }
+
+  return { pins: allPins.slice(0, maxResults), bookmark: nextBookmark };
 }
 
 // ──────────────────────────────────────────────
@@ -224,12 +251,11 @@ app.get('/api/pinterest/search', async (req, res) => {
 
     const count = parseInt(req.query.count || req.query.limit || '10', 10);
     const size = req.query.size || 'medium';
-    const page = parseInt(req.query.page || '1', 10);
     const bookmark = req.query.bookmark || null;
 
-    console.log(`🔍 Searching: "${query}" (count: ${count}, page: ${page})`);
+    console.log(`🔍 Searching: "${query}" (count: ${count})`);
 
-    const result = await searchPinterest(query, count, bookmark, page);
+    const result = await searchPinterest(query, count, bookmark);
 
     // Apply image size
     const data = result.pins.map(pin => {
@@ -245,14 +271,13 @@ app.get('/api/pinterest/search', async (req, res) => {
       success: true,
       query,
       count: data.length,
-      page,
       hasMore: !!result.bookmark,
       bookmark: result.bookmark || '',
       data,
     });
   } catch (err) {
     console.error('Search endpoint error:', err.message);
-    res.json({ success: true, query: req.query.q || '', count: 0, page: 1, hasMore: false, bookmark: '', data: [] });
+    res.json({ success: true, query: req.query.q || '', count: 0, hasMore: false, bookmark: '', data: [] });
   }
 });
 
@@ -301,8 +326,8 @@ app.get('/', (req, res) => {
     status: 'alive', name: 'Pinterest API', version: '1.1.0', loggedIn,
     note: 'Set PINTEREST_EMAIL & PINTEREST_PASSWORD in env for search',
     endpoints: {
-      search: 'GET /api/pinterest/search?q=YOUR_QUERY&count=10&size=medium&page=1',
-      nextPage: 'Use the "bookmark" from response as &bookmark=YOUR_BOOKMARK to get next page',
+      search: 'GET /api/pinterest/search?q=YOUR_QUERY&count=10&size=medium',
+      bookmark: 'Pass &bookmark=VALUE from previous response for next page',
       download: 'GET /api/pinterest/download?url=IMAGE_URL',
       ocr: 'POST /api/pinterest/ocr { "url": "IMAGE_URL" }',
     },
