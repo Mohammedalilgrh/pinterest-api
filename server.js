@@ -87,10 +87,29 @@ async function loginToPinterest() {
 // Pinterest Search
 // ──────────────────────────────────────────────
 
+const RANDOM_WORDS = [
+  'daily','best','top','trending','popular','amazing','beautiful','cool',
+  'awesome','epic','great','wonderful','fantastic','incredible','perfect',
+  'stunning','gorgeous','lovely','nice','super','mega','ultra','fresh',
+  'new','hot','viral','modern','classic','unique','special','premium',
+];
+
+function buildFreshQuery(query) {
+  // Sprinkle random unique garbage to force Pinterest to serve different results
+  // Pinterest treats "quotes x7k2" as a different search from "quotes m9p1"
+  const suffix = Math.random().toString(36).substring(2, 6);
+  const word = RANDOM_WORDS[Math.floor(Math.random() * RANDOM_WORDS.length)];
+  return `${query} ${word} ${suffix}`;
+}
+
 async function searchPinterest(query, limit = 10, bookmark = null, pageNum = 1) {
   const maxResults = Math.min(limit, 50);
   const allPins = [];
   let nextBookmark = null;
+
+  // Build the ACTUAL Pinterest search query with freshness injection
+  // The user query is the niche, but we add noise so every request is different
+  const freshPinterestQuery = buildFreshQuery(query);
 
   let browser;
   try {
@@ -144,7 +163,8 @@ async function searchPinterest(query, limit = 10, bookmark = null, pageNum = 1) 
     });
 
     // Build search URL with optional bookmark for pagination
-    let searchUrl = `https://www.pinterest.com/search/pins/?q=${encodeURIComponent(query)}&rs=typed`;
+    // Use the FRESHENED query so Pinterest never caches
+    let searchUrl = `https://www.pinterest.com/search/pins/?q=${encodeURIComponent(freshPinterestQuery)}&rs=typed`;
     if (bookmark) {
       searchUrl += `&bookmark=${encodeURIComponent(bookmark)}`;
     }
@@ -152,11 +172,8 @@ async function searchPinterest(query, limit = 10, bookmark = null, pageNum = 1) 
     await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
     await page.waitForTimeout(4000);
 
-    // If we want page > 1, pass a bookmark from a previous page:
-    // The user can either pass a bookmark directly, or use page number.
-    // If page > 1 and no bookmark provided, scroll extra times to simulate
-    // getting further results (scrolling triggers more API calls with new bookmarks).
-    const scrollsToDo = pageNum > 1 && !bookmark ? 2 + (pageNum * 2) : 5;
+    // Scroll to load more pins
+    const scrollsToDo = pageNum > 1 && !bookmark ? Math.min(pageNum * 2, 15) : 5;
     for (let i = 0; i < scrollsToDo && allPins.length < maxResults; i++) {
       await page.evaluate(() => window.scrollBy(0, 800));
       await page.waitForTimeout(1500);
