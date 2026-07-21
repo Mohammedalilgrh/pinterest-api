@@ -87,9 +87,10 @@ async function loginToPinterest() {
 // Pinterest Search
 // ──────────────────────────────────────────────
 
-async function searchPinterest(query, limit = 10) {
+async function searchPinterest(query, limit = 10, bookmark = null, pageNum = 1) {
   const maxResults = Math.min(limit, 50);
   const allPins = [];
+  let nextBookmark = null;
 
   let browser;
   try {
@@ -113,13 +114,20 @@ async function searchPinterest(query, limit = 10) {
 
     const page = await context.newPage();
 
-    // Intercept Pinterest's internal API
+    // Intercept Pinterest's internal API to capture search responses
     page.on('response', async (response) => {
       const url = response.url();
       if (url.includes('BaseSearchResource/get') && response.status() === 200) {
         try {
           const json = await response.json();
-          const results = json?.resource_response?.data?.results || [];
+          const resourceData = json?.resource_response?.data;
+          const results = resourceData?.results || [];
+
+          // Capture the bookmark for pagination
+          if (resourceData?.bookmark) {
+            nextBookmark = resourceData.bookmark;
+          }
+
           for (const pin of results) {
             if (allPins.length >= maxResults) break;
             let image = pin.images?.orig?.url || pin.images?.['564x']?.url || pin.images?.['736x']?.url || pin.images?.['236x']?.url || '';
@@ -135,14 +143,21 @@ async function searchPinterest(query, limit = 10) {
       }
     });
 
-    await page.goto(
-      `https://www.pinterest.com/search/pins/?q=${encodeURIComponent(query)}&rs=typed`,
-      { waitUntil: 'domcontentloaded', timeout: 25000 }
-    );
-    await page.waitForTimeout(5000);
+    // Build search URL with optional bookmark for pagination
+    let searchUrl = `https://www.pinterest.com/search/pins/?q=${encodeURIComponent(query)}&rs=typed`;
+    if (bookmark) {
+      searchUrl += `&bookmark=${encodeURIComponent(bookmark)}`;
+    }
 
-    // Scroll to load more pins
-    for (let i = 0; i < 5 && allPins.length < maxResults; i++) {
+    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
+    await page.waitForTimeout(4000);
+
+    // If we want page > 1, pass a bookmark from a previous page:
+    // The user can either pass a bookmark directly, or use page number.
+    // If page > 1 and no bookmark provided, scroll extra times to simulate
+    // getting further results (scrolling triggers more API calls with new bookmarks).
+    const scrollsToDo = pageNum > 1 && !bookmark ? 2 + (pageNum * 2) : 5;
+    for (let i = 0; i < scrollsToDo && allPins.length < maxResults; i++) {
       await page.evaluate(() => window.scrollBy(0, 800));
       await page.waitForTimeout(1500);
     }
@@ -171,11 +186,11 @@ async function searchPinterest(query, limit = 10) {
 
     await context.close();
     await browser.close();
-    return allPins.slice(0, maxResults);
+    return { pins: allPins.slice(0, maxResults), bookmark: nextBookmark };
   } catch (err) {
     console.error('Search error:', err.message);
     if (browser) await browser.close().catch(() => {});
-    return allPins;
+    return { pins: allPins, bookmark: nextBookmark };
   }
 }
 
@@ -192,12 +207,15 @@ app.get('/api/pinterest/search', async (req, res) => {
 
     const count = parseInt(req.query.count || req.query.limit || '10', 10);
     const size = req.query.size || 'medium';
+    const page = parseInt(req.query.page || '1', 10);
+    const bookmark = req.query.bookmark || null;
 
-    console.log(`🔍 Searching: "${query}" (${count})`);
-    const pins = await searchPinterest(query, count);
+    console.log(`🔍 Searching: "${query}" (count: ${count}, page: ${page})`);
+
+    const result = await searchPinterest(query, count, bookmark, page);
 
     // Apply image size
-    const data = pins.map(pin => {
+    const data = result.pins.map(pin => {
       let img = pin.image;
       if (img) {
         if (size === 'small') img = img.replace(/\/\d+x\//, '/236x/');
@@ -206,10 +224,18 @@ app.get('/api/pinterest/search', async (req, res) => {
       return { ...pin, image: img };
     });
 
-    res.json({ success: true, query, count: data.length, data });
+    res.json({
+      success: true,
+      query,
+      count: data.length,
+      page,
+      hasMore: !!result.bookmark,
+      bookmark: result.bookmark || '',
+      data,
+    });
   } catch (err) {
     console.error('Search endpoint error:', err.message);
-    res.json({ success: true, query: req.query.q || '', count: 0, data: [] });
+    res.json({ success: true, query: req.query.q || '', count: 0, page: 1, hasMore: false, bookmark: '', data: [] });
   }
 });
 
@@ -258,7 +284,8 @@ app.get('/', (req, res) => {
     status: 'alive', name: 'Pinterest API', version: '1.1.0', loggedIn,
     note: 'Set PINTEREST_EMAIL & PINTEREST_PASSWORD in env for search',
     endpoints: {
-      search: 'GET /api/pinterest/search?q=YOUR_QUERY&count=10&size=medium',
+      search: 'GET /api/pinterest/search?q=YOUR_QUERY&count=10&size=medium&page=1',
+      nextPage: 'Use the "bookmark" from response as &bookmark=YOUR_BOOKMARK to get next page',
       download: 'GET /api/pinterest/download?url=IMAGE_URL',
       ocr: 'POST /api/pinterest/ocr { "url": "IMAGE_URL" }',
     },

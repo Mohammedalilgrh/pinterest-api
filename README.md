@@ -80,29 +80,45 @@ GET /api/pinterest/search
 | `q` (or `query`, `search`) | ✅ Yes | — | Your niche / keyword |
 | `count` (or `limit`) | ❌ No | `10` | Number of results (1-50) |
 | `size` | ❌ No | `medium` | `small` = 236px, `medium` = 564px, `large` = original |
+| `page` | ❌ No | `1` | Page number (scrolls further down for fresh results) |
+| `bookmark` | ❌ No | — | Bookmark string from previous response → exact next page |
 
-**Example request:**
+**Example request (simple):**
 ```
-GET https://pinterest-api.onrender.com/api/pinterest/search?q=motivational+quotes&count=5&size=large
+GET https://pinterest-api.onrender.com/api/pinterest/search?q=viral+quotes&count=5&size=large&page=2
+```
+
+**Example request (advanced — use bookmark for exact pagination):**
+```
+// First call:
+GET ...?q=viral+quotes&count=5
+// Response includes: "bookmark": "abc123..."
+// Second call (next exact page):
+GET ...?q=viral+quotes&count=5&bookmark=abc123...
 ```
 
 **Example response:**
 ```json
 {
   "success": true,
-  "query": "motivational quotes",
+  "query": "viral quotes",
   "count": 5,
+  "page": 2,
+  "hasMore": true,
+  "bookmark": "WyJQSU4iLDE3MzI5ODk...",
   "data": [
     {
       "id": "123456789",
-      "title": "Believe in Yourself - Inspirational Quote",
-      "description": "Believe you can and you're halfway there. - Theodore Roosevelt",
+      "title": "Believe in Yourself",
+      "description": "Believe you can and you're halfway there.",
       "image": "https://i.pinimg.com/originals/abc123/image.jpg",
       "link": "https://www.pinterest.com/pin/123456789/"
     }
   ]
 }
 ```
+
+> 💡 **To always get fresh results:** In n8n, use an **Item Lists → Summarize** node to extract the `bookmark` from each response, then pass it to the next execution's HTTP request as `&bookmark={{ $json.bookmark }}`. Or simply increment the `page` parameter each time.
 
 ### 2. Download Image 🖼️
 
