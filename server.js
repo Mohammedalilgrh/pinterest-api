@@ -319,7 +319,7 @@ let ocrWorker = null;
 
 async function extractTextSimple(imageUrl) {
   try {
-    if (!ocrWorker) ocrWorker = await createWorker('eng', { logger: () => {} });
+    if (!ocrWorker) ocrWorker = await createWorker('eng');
     console.log(`🔍 OCR: ${imageUrl.substring(0, 60)}...`);
     const { data } = await ocrWorker.recognize(imageUrl);
     const text = data.text?.trim() || '';
