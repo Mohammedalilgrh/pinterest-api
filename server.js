@@ -1,5 +1,7 @@
 const express = require('express');
-const { chromium } = require('playwright');
+const { chromium } = require('playwright-extra');
+const stealth = require('puppeteer-extra-plugin-stealth')();
+chromium.use(stealth);
 const { createWorker } = require('tesseract.js');
 const cors = require('cors');
 const fs = require('fs');
@@ -319,101 +321,187 @@ async function extractTextViaLens(imageUrl) {
   try {
     browser = await chromium.launch({
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled', '--window-size=1920,1080'],
     });
     const context = await browser.newContext({
-      userAgent: UA,
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36',
       viewport: { width: 1920, height: 1080 },
       locale: 'en-US',
+      timezoneId: 'America/New_York',
+    });
+    await context.addInitScript(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => false });
+      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
     });
     const page = await context.newPage();
 
     const lensUrl = `https://lens.google.com/uploadbyurl?url=${encodeURIComponent(imageUrl)}`;
     console.log(`🔍 Google Lens: ${imageUrl.substring(0, 50)}...`);
-    await page.goto(lensUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.goto(lensUrl, { waitUntil: 'load', timeout: 30000 });
+    await page.waitForTimeout(3000);
 
-    // Wait for Lens to process — it shows a spinner then results
-    await page.waitForTimeout(8000);
-
-    // Wait for the processing to complete (spinner disappears, results show)
+    // Handle cookie consent if it appears
     try {
-      await page.waitForFunction(() => {
-        // Processing is done when these selectors appear OR spinner is gone
-        const noSpinner = !document.querySelector('[role="progressbar"]');
-        const hasResults = document.querySelector('[role="tabpanel"], .Vf0PKf, .S3t8J, .lensText, [class*="text"]');
-        return hasResults || (noSpinner && document.body.innerText.length > 500);
-      }, { timeout: 25000 });
-    } catch (e) {
-      // Continue anyway after timeout
-    }
-    await page.waitForTimeout(2000);
-
-    // Try clicking "Text" tab to get text view
-    try {
-      const textTab = page.locator('button:has-text("Text"), [role="tab"]:has-text("Text"), div:has-text("Text")').first();
-      if (await textTab.count() > 0) {
-        await textTab.click({ timeout: 3000 });
-        await page.waitForTimeout(2000);
-      }
+      const cookieBtn = page.locator('button:has-text("Accept"), button:has-text("Accept all"), button:has-text("I agree"), button[aria-label*="Accept"]').first();
+      if (await cookieBtn.count() > 0) { await cookieBtn.click({ timeout: 5000 }); await page.waitForTimeout(1000); }
     } catch (e) {}
 
-    // Try clicking "Copy text" button — it gives us the cleanest result
-    let lensText = '';
-    try {
-      const copyBtn = page.locator('button:has-text("Copy text"), button[aria-label*="Copy"], button:has-text("Select all")').first();
-      if (await copyBtn.count() > 0) {
-        // Try to extract text via clipboard API
-        lensText = await page.evaluate(() => {
-          // Look for text display elements
-          const textEls = document.querySelectorAll('.S3t8J, .Vf0PKf, [class*="text-detected"], [class*="text-block"]');
-          if (textEls.length > 0) {
-            return Array.from(textEls).map(el => el.textContent?.trim()).filter(Boolean).join('\n');
-          }
-          return '';
-        });
-      }
-    } catch (e) {}
-
-    // Fallback: extract text from the page content (what Lens detected)
-    if (!lensText) {
-      lensText = await page.evaluate(() => {
-        // Multiple selector attempts
-        const selectors = [
-          '.S3t8J', '.Vf0PKf',
-          '[role="tabpanel"] p',
-          '[class*="text"]:not([class*="header"]):not([class*="nav"])',
-          '.lensText',
-          'div[jsname] span',
-        ];
-        for (const sel of selectors) {
-          const els = document.querySelectorAll(sel);
-          if (els.length > 0) {
-            const texts = Array.from(els).map(el => el.textContent?.trim()).filter(Boolean);
-            if (texts.length > 0) return texts.join('\n');
-          }
+    // Wait for Lens to process the image (spinner goes away / results appear)
+    // This can take 5-15 seconds
+    let processed = false;
+    for (let i = 0; i < 30; i++) {
+      const hasSpinner = await page.evaluate(() => {
+        // Check for various loading indicators
+        const spinners = document.querySelectorAll('[role="progressbar"], [class*="spinner"], [class*="loading"], [aria-busy="true"]');
+        const textElements = document.querySelectorAll('.S3t8J, .Vf0PKf, [class*="text-detected"], [class*="text-block"], [class*="lensText"], [data-test="text-results"]');
+        // If we have text results, we're done
+        if (textElements.length > 0) return false;
+        // If spinner is gone and page loaded, check text
+        if (spinners.length === 0) {
+          const body = document.body?.innerText || '';
+          // If we see content (not just spinner text), we're good
+          if (body.length > 300) return false;
         }
-        // Last resort — get all visible text from the main content area
-        const main = document.querySelector('main, [role="main"], #lens-content, .lens-content');
-        if (main) return main.innerText.trim();
-        return '';
+        return true; // still loading
       });
+      if (!hasSpinner) { processed = true; break; }
+      await page.waitForTimeout(1000);
     }
 
-    // Clean up the text
+    if (!processed) {
+      console.log('⚠️ Lens processing timed out, trying to extract anyway');
+    }
+
+    // Now extract the detected text
+    let lensText = await page.evaluate(() => {
+      // Multiple extraction strategies
+
+      // Strategy 1: Google Lens text result elements
+      const selectors = [
+        '.S3t8J', '.Vf0PKf',
+        '[class*="text-detected"]',
+        '[class*="text-block"]',
+        '[class*="lensText"]',
+        '[data-test="text-results"] span',
+        'div[role="tabpanel"] span',
+        'div[jsname] span',
+      ];
+      for (const sel of selectors) {
+        const els = document.querySelectorAll(sel);
+        if (els.length > 0) {
+          const texts = Array.from(els).map(el => el.textContent?.trim()).filter(Boolean);
+          if (texts.length > 0) return texts.join('\n');
+        }
+      }
+
+      // Strategy 2: Try clicking "Text" tab first then re-extract
+      const tabs = document.querySelectorAll('button, [role="tab"]');
+      for (const tab of tabs) {
+        if (tab.textContent?.toLowerCase().includes('text')) {
+          tab.click();
+          break;
+        }
+      }
+
+      // Strategy 3: Get all visible text
+      const body = document.body?.innerText || '';
+      return body.trim();
+    });
+
+    // Clean the text
     lensText = lensText
       .replace(/\s+/g, ' ')
+      .trim()
+      // Remove common Lens UI text that's not the actual result
+      .replace(/Text\s*Search\s*Translate\s*Homework\s*(Web|Images|Shopping|Videos|News|Maps|Books)/gi, '')
+      .replace(/Send feedback|About Google|Privacy|Terms|Help|Learn more|Feedback/gi, '')
+      .replace(/Google Lens.*?lens\s*\.\s*google/i, '')
       .trim();
 
     await context.close();
     await browser.close();
 
-    console.log(`✅ Lens text: ${lensText.substring(0, 60)}...`);
-    return { text: lensText, source: 'google_lens' };
+    if (lensText && lensText.length > 20) {
+      console.log(`✅ Lens text (${lensText.length} chars): ${lensText.substring(0, 80)}...`);
+      return { text: lensText, source: 'google_lens' };
+    }
+
+    // Fallback: if Lens gave us nothing useful, try Google Images reverse search
+    console.log('⚠️ Lens gave short/no text, trying Google Images...');
+    try {
+      const { text: fallbackText } = await extractTextViaGoogleImages(imageUrl);
+      if (fallbackText) {
+        return { text: fallbackText, source: 'google_images' };
+      }
+    } catch (e) {}
+
+    return { text: lensText || '', source: 'google_lens' };
 
   } catch (err) {
-    console.error('❌ Lens error:', err.message);
+    console.error('❌ Lens error:', err.message?.substring(0, 80));
     if (browser) await browser.close().catch(() => {});
+    // Fallback to Google Images
+    try {
+      const { text: fallbackText } = await extractTextViaGoogleImages(imageUrl);
+      if (fallbackText) return { text: fallbackText, source: 'google_images' };
+    } catch (e) {}
     return { text: '', source: 'google_lens', error: err.message };
+  }
+}
+
+// ──────────────────────────────────────────────
+// Google Images Reverse Search (Fallback)
+// ──────────────────────────────────────────────
+
+async function extractTextViaGoogleImages(imageUrl) {
+  let browser;
+  try {
+    browser = await chromium.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled', '--window-size=1920,1080'],
+    });
+    const context = await browser.newContext({
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36',
+      viewport: { width: 1920, height: 1080 },
+      locale: 'en-US',
+    });
+    await context.addInitScript(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => false });
+      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+    });
+    const page = await context.newPage();
+
+    await page.goto(`https://www.google.com/searchbyimage?image_url=${encodeURIComponent(imageUrl)}`, { waitUntil: 'load', timeout: 30000 });
+    await page.waitForTimeout(5000);
+
+    // Wait for results to load
+    for (let i = 0; i < 20; i++) {
+      const ready = await page.evaluate(() => {
+        const text = document.body?.innerText || '';
+        return text.length > 500 && !text.includes('loading');
+      });
+      if (ready) break;
+      await page.waitForTimeout(1000);
+    }
+
+    // Extract text snippets from the page — Google Images shows visually similar images
+    // and sometimes text snippets from the image
+    const text = await page.evaluate(() => {
+      // Get all text from the results section
+      const results = document.querySelectorAll('[data-hveid], .yG4QQe, .TbwUpd, .i0X6df, .LC20lb, .VwiC3b, span.st');
+      const texts = Array.from(results).map(el => el.textContent?.trim()).filter(Boolean);
+      return texts.join('\n');
+    });
+
+    await context.close();
+    await browser.close();
+    return { text };
+
+  } catch (err) {
+    console.error('❌ Google Images error:', err.message?.substring(0, 80));
+    if (browser) await browser.close().catch(() => {});
+    return { text: '' };
   }
 }
 
