@@ -312,109 +312,47 @@ app.get('/api/pinterest/download', async (req, res) => {
   }
 });
 
-const sharp = require('sharp');
-const http = require('http');
+let ocrWorker = null;
 
 // ──────────────────────────────────────────────
-// Download Image to Buffer
+// Simple Tesseract OCR (no native deps, works on Render)
 // ──────────────────────────────────────────────
 
-function downloadImage(url) {
-  return new Promise((resolve, reject) => {
-    const client = url.startsWith('https') ? https : http;
-    client.get(url, { headers: { 'User-Agent': UA, 'Referer': 'https://www.pinterest.com/' }, timeout: 15000 }, (res) => {
-      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        return downloadImage(res.headers.location).then(resolve).catch(reject);
-      }
-      const chunks = [];
-      res.on('data', c => chunks.push(c));
-      res.on('end', () => resolve(Buffer.concat(chunks)));
-      res.on('error', reject);
-    }).on('error', reject);
-  });
-}
-
-// ──────────────────────────────────────────────
-// Enhanced OCR with Image Preprocessing
-// ──────────────────────────────────────────────
-
-async function extractTextWithPreprocessing(imageUrl) {
+async function extractTextSimple(imageUrl) {
   try {
-    // Download the image
-    const buffer = await downloadImage(imageUrl);
-    if (!buffer || buffer.length < 100) return { text: '', confidence: 0, method: 'failed' };
-
-    // Preprocess: convert to grayscale, increase contrast, resize for better OCR
-    const processed = await sharp(buffer)
-      .grayscale()
-      .normalize()
-      .resize(1600, null, { fit: 'inside', withoutEnlargement: true })
-      .sharpen()
-      .png()
-      .toBuffer();
-
-    // Try OCR on the preprocessed image
-    if (!ocrWorker) ocrWorker = await createWorker('eng', {
-      logger: () => {},
-      cacheMethod: 'write',
-    });
-    const { data } = await ocrWorker.recognize(processed);
+    if (!ocrWorker) ocrWorker = await createWorker('eng', { logger: () => {} });
+    console.log(`🔍 OCR: ${imageUrl.substring(0, 60)}...`);
+    const { data } = await ocrWorker.recognize(imageUrl);
     const text = data.text?.trim() || '';
-    const confidence = data.confidence || 0;
-
-    if (text && text.length > 5) {
-      console.log(`✅ OCR (preprocessed): ${text.substring(0, 60)}... (conf: ${Math.round(confidence)})`);
-      return { text, confidence: Math.round(confidence), method: 'preprocessed_tesseract' };
-    }
-
-    // Fallback: try without preprocessing on original
-    const { data: data2 } = await ocrWorker.recognize(buffer);
-    const text2 = data2.text?.trim() || '';
-    if (text2) {
-      console.log(`✅ OCR (raw): ${text2.substring(0, 60)}...`);
-      return { text: text2, confidence: Math.round(data2.confidence || 0), method: 'raw_tesseract' };
-    }
-
-    return { text: '', confidence: 0, method: 'failed' };
-
+    console.log(`✅ OCR: ${text.substring(0, 80)}... (conf: ${Math.round(data.confidence || 0)})`);
+    return { text, confidence: Math.round(data.confidence || 0) };
   } catch (err) {
     console.error('❌ OCR error:', err.message?.substring(0, 80));
-    return { text: '', confidence: 0, method: 'error', error: err.message };
+    return { text: '', confidence: 0 };
   }
 }
 
 async function extractTextViaLens(imageUrl) {
-  // Google blocks Lens from datacenter IPs (Render).
-  // Using enhanced Tesseract OCR with image preprocessing instead.
-  // This gives much better results than raw Tesseract.
-  console.log(`🔍 Extracting text: ${imageUrl.substring(0, 60)}...`);
-  const result = await extractTextWithPreprocessing(imageUrl);
-  if (result.text) {
-    console.log(`✅ ${result.method}: ${result.text.substring(0, 80)}...`);
-    return { text: result.text, source: result.method, confidence: result.confidence };
-  }
-  return { text: '', source: 'preprocessed_ocr', error: result.error || 'No text found' };
+  // Google blocks datacenter IPs — using Tesseract OCR directly
+  return await extractTextSimple(imageUrl);
 }
-
-let ocrWorker = null;
 
 app.post('/api/pinterest/ocr', async (req, res) => {
   try {
     const imageUrl = req.body?.url;
     if (!imageUrl) return res.status(400).json({ success: false, error: 'Missing "url"' });
-    const result = await extractTextWithPreprocessing(imageUrl);
+    const result = await extractTextSimple(imageUrl);
     res.json({
       success: !!result.text,
       text: result.text,
-      confidence: result.confidence || 0,
-      method: result.method || 'tesseract',
+      confidence: result.confidence,
     });
   } catch (err) {
     res.status(500).json({ success: false, error: 'OCR failed', details: err.message });
   }
 });
 
-// ⭐ Lens endpoint — now uses preprocessed OCR since Google blocks datacenter IPs
+// ⭐ Lens endpoint
 app.post('/api/pinterest/lens', async (req, res) => {
   try {
     const imageUrl = req.body?.url;
