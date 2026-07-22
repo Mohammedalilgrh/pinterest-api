@@ -6,6 +6,7 @@ A **self-hosted API** that searches Pinterest, downloads images, and extracts te
 - 🔍 **Search** any niche on Pinterest → get image URLs, titles, pin links
 - 🖼️ **Download** any image → save it locally or to cloud storage
 - 📝 **OCR** → extract text/quotes from images (free, no API key needed)
+- 🔎 **Google Lens** → better text extraction than OCR, gets text from any image
 
 ---
 
@@ -157,7 +158,60 @@ Content-Type: application/json
 }
 ```
 
-### 4. Health Check 💚
+### 4. Google Lens — Extract Text from Any Image 🔎
+
+**Better than OCR.** Google Lens detects text from images way more accurately than Tesseract. It works on quote graphics, signs, screenshots, handwriting — anything.
+
+```
+POST /api/pinterest/lens
+Content-Type: application/json
+
+{
+  "url": "https://i.pinimg.com/originals/abc123/image.jpg"
+}
+```
+
+**Response (8-15 seconds — Lens processes the image):**
+```json
+{
+  "success": true,
+  "text": "Believe you can and you're halfway there.\n- Theodore Roosevelt",
+  "source": "google_lens"
+}
+```
+
+### 5. OCR with Method Choice — Tesseract, Lens, or Both 📝
+
+Same as OCR endpoint but you can choose the extraction method:
+
+```
+POST /api/pinterest/ocr
+Content-Type: application/json
+
+{
+  "url": "https://i.pinimg.com/originals/abc123/image.jpg",
+  "method": "google_lens"
+}
+```
+
+| `method` | Description | Speed |
+|---|---|---|
+| `tesseract` | Tesseract.js (local, no browser) | 1-3 seconds |
+| `google_lens` | Google Lens (uses Playwright browser) | 8-15 seconds |
+| `both` | Returns results from both methods | Slowest |
+
+**Response with `both`:**
+```json
+{
+  "success": true,
+  "results": [
+    { "text": "...", "source": "google_lens" },
+    { "text": "...", "source": "tesseract", "confidence": 92 }
+  ]
+}
+```
+
+### 6. Health Check 💚
 ```
 GET /
 ```
@@ -175,7 +229,7 @@ Returns the server status and all available endpoints.
         ↓
 [Loop Over Items] for each pin
         ├──→ [HTTP Request] Download image → [Write Binary File]
-        └──→ [HTTP Request] OCR → [Filter] text not empty → [Save to DB / Google Sheets]
+        └──→ [HTTP Request] Lens → extract quote text
 ```
 
 #### Step 1: HTTP Request Node — Search
@@ -191,11 +245,9 @@ Output: `{{ $json.data }}` is an array of pins with `id`, `title`, `description`
 
 #### Step 2: Loop Over Items
 
-```javascript
-// In the Loop node's settings pane
-const items = $input.all();
-const loopItems = $json.data || [];
-return loopItems;
+In the Loop node settings, add Items mode:
+```
+{{ $json.data }}
 ```
 
 #### Step 3: HTTP Request Node — Download (inside loop)
@@ -206,15 +258,19 @@ return loopItems;
 | **URL** | `https://pinterest-api.onrender.com/api/pinterest/download?url={{ $json.image }}` |
 | **Response Format** | `File` |
 
-#### Step 4: HTTP Request Node — OCR (inside loop)
+#### Step 4: HTTP Request Node — Google Lens Text Extraction (⭐ recommended)
 
 | Setting | Value |
 |---|---|
 | **Method** | `POST` |
-| **URL** | `https://pinterest-api.onrender.com/api/pinterest/ocr` |
+| **URL** | `https://pinterest-api.onrender.com/api/pinterest/lens` |
 | **Body** | `{ "url": "{{ $json.image }}" }` |
 | **Headers** | `Content-Type`: `application/json` |
 | **Response Format** | `JSON` |
+
+⏱ Takes 8-15 seconds per image but gets text right even on stylized quote graphics.
+
+Output: `{{ $json.text }}` = the quote text. Save it to Google Sheets / Telegram / Notion.
 
 ---
 

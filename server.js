@@ -4,12 +4,15 @@ const { createWorker } = require('tesseract.js');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
+const https = require('https');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const PINTEREST_EMAIL = process.env.PINTEREST_EMAIL || '';
 const PINTEREST_PASSWORD = process.env.PINTEREST_PASSWORD || '';
 const STATE_FILE = path.join(__dirname, 'pinterest_auth.json');
+
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
 
 app.use(cors());
 app.use(express.json({ limit: '5mb' }));
@@ -307,17 +310,173 @@ app.get('/api/pinterest/download', async (req, res) => {
   }
 });
 
+// ──────────────────────────────────────────────
+// Google Lens Text Extraction
+// ──────────────────────────────────────────────
+
+async function extractTextViaLens(imageUrl) {
+  let browser;
+  try {
+    browser = await chromium.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+    });
+    const context = await browser.newContext({
+      userAgent: UA,
+      viewport: { width: 1920, height: 1080 },
+      locale: 'en-US',
+    });
+    const page = await context.newPage();
+
+    const lensUrl = `https://lens.google.com/uploadbyurl?url=${encodeURIComponent(imageUrl)}`;
+    console.log(`🔍 Google Lens: ${imageUrl.substring(0, 50)}...`);
+    await page.goto(lensUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+
+    // Wait for Lens to process — it shows a spinner then results
+    await page.waitForTimeout(8000);
+
+    // Wait for the processing to complete (spinner disappears, results show)
+    try {
+      await page.waitForFunction(() => {
+        // Processing is done when these selectors appear OR spinner is gone
+        const noSpinner = !document.querySelector('[role="progressbar"]');
+        const hasResults = document.querySelector('[role="tabpanel"], .Vf0PKf, .S3t8J, .lensText, [class*="text"]');
+        return hasResults || (noSpinner && document.body.innerText.length > 500);
+      }, { timeout: 25000 });
+    } catch (e) {
+      // Continue anyway after timeout
+    }
+    await page.waitForTimeout(2000);
+
+    // Try clicking "Text" tab to get text view
+    try {
+      const textTab = page.locator('button:has-text("Text"), [role="tab"]:has-text("Text"), div:has-text("Text")').first();
+      if (await textTab.count() > 0) {
+        await textTab.click({ timeout: 3000 });
+        await page.waitForTimeout(2000);
+      }
+    } catch (e) {}
+
+    // Try clicking "Copy text" button — it gives us the cleanest result
+    let lensText = '';
+    try {
+      const copyBtn = page.locator('button:has-text("Copy text"), button[aria-label*="Copy"], button:has-text("Select all")').first();
+      if (await copyBtn.count() > 0) {
+        // Try to extract text via clipboard API
+        lensText = await page.evaluate(() => {
+          // Look for text display elements
+          const textEls = document.querySelectorAll('.S3t8J, .Vf0PKf, [class*="text-detected"], [class*="text-block"]');
+          if (textEls.length > 0) {
+            return Array.from(textEls).map(el => el.textContent?.trim()).filter(Boolean).join('\n');
+          }
+          return '';
+        });
+      }
+    } catch (e) {}
+
+    // Fallback: extract text from the page content (what Lens detected)
+    if (!lensText) {
+      lensText = await page.evaluate(() => {
+        // Multiple selector attempts
+        const selectors = [
+          '.S3t8J', '.Vf0PKf',
+          '[role="tabpanel"] p',
+          '[class*="text"]:not([class*="header"]):not([class*="nav"])',
+          '.lensText',
+          'div[jsname] span',
+        ];
+        for (const sel of selectors) {
+          const els = document.querySelectorAll(sel);
+          if (els.length > 0) {
+            const texts = Array.from(els).map(el => el.textContent?.trim()).filter(Boolean);
+            if (texts.length > 0) return texts.join('\n');
+          }
+        }
+        // Last resort — get all visible text from the main content area
+        const main = document.querySelector('main, [role="main"], #lens-content, .lens-content');
+        if (main) return main.innerText.trim();
+        return '';
+      });
+    }
+
+    // Clean up the text
+    lensText = lensText
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    await context.close();
+    await browser.close();
+
+    console.log(`✅ Lens text: ${lensText.substring(0, 60)}...`);
+    return { text: lensText, source: 'google_lens' };
+
+  } catch (err) {
+    console.error('❌ Lens error:', err.message);
+    if (browser) await browser.close().catch(() => {});
+    return { text: '', source: 'google_lens', error: err.message };
+  }
+}
+
 let ocrWorker = null;
 
 app.post('/api/pinterest/ocr', async (req, res) => {
   try {
     const imageUrl = req.body?.url;
+    const method = req.body?.method || 'both'; // 'tesseract', 'google_lens', or 'both'
     if (!imageUrl) return res.status(400).json({ success: false, error: 'Missing "url"' });
-    if (!ocrWorker) ocrWorker = await createWorker('eng');
-    const { data } = await ocrWorker.recognize(imageUrl);
-    res.json({ success: true, text: data.text?.trim() || '', confidence: data.confidence || 0 });
+
+    let texts = [];
+
+    // Google Lens extraction
+    if (method === 'google_lens' || method === 'both') {
+      const lensResult = await extractTextViaLens(imageUrl);
+      if (lensResult.text) {
+        texts.push({ text: lensResult.text, source: 'google_lens' });
+      }
+    }
+
+    // Tesseract OCR fallback
+    if (method === 'tesseract' || method === 'both') {
+      if (!ocrWorker) ocrWorker = await createWorker('eng');
+      const { data } = await ocrWorker.recognize(imageUrl);
+      if (data.text?.trim()) {
+        texts.push({ text: data.text.trim(), source: 'tesseract', confidence: data.confidence || 0 });
+      }
+    }
+
+    if (texts.length === 0) {
+      return res.status(500).json({ success: false, error: 'No text extracted' });
+    }
+
+    // If both methods gave text, return the better one
+    const response = { success: true, results: texts };
+    // For backwards compatibility, if you just want the best text
+    if (texts.length === 1 || req.body?.method !== 'both') {
+      response.text = texts[0].text;
+      response.source = texts[0].source;
+      if (texts[0].confidence) response.confidence = texts[0].confidence;
+    }
+
+    res.json(response);
   } catch (err) {
     res.status(500).json({ success: false, error: 'OCR failed', details: err.message });
+  }
+});
+
+// ⭐ Google Lens only endpoint — faster, no Tesseract overhead
+app.post('/api/pinterest/lens', async (req, res) => {
+  try {
+    const imageUrl = req.body?.url;
+    if (!imageUrl) return res.status(400).json({ success: false, error: 'Missing "url"' });
+    const result = await extractTextViaLens(imageUrl);
+    res.json({
+      success: !!result.text,
+      text: result.text,
+      source: 'google_lens',
+      error: result.error || null,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
@@ -329,7 +488,8 @@ app.get('/', (req, res) => {
       search: 'GET /api/pinterest/search?q=YOUR_QUERY&count=10&size=medium',
       bookmark: 'Pass &bookmark=VALUE from previous response for next page',
       download: 'GET /api/pinterest/download?url=IMAGE_URL',
-      ocr: 'POST /api/pinterest/ocr { "url": "IMAGE_URL" }',
+      ocr: 'POST /api/pinterest/ocr { "url": "IMAGE_URL", "method": "both|tesseract|google_lens" }',
+      lens: 'POST /api/pinterest/lens { "url": "IMAGE_URL" }  (⭐ Google Lens ONLY - cleaner text)',
     },
   });
 });
