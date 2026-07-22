@@ -312,197 +312,88 @@ app.get('/api/pinterest/download', async (req, res) => {
   }
 });
 
+const sharp = require('sharp');
+const http = require('http');
+
 // ──────────────────────────────────────────────
-// Google Lens Text Extraction
+// Download Image to Buffer
 // ──────────────────────────────────────────────
 
-async function extractTextViaLens(imageUrl) {
-  let browser;
-  try {
-    browser = await chromium.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled', '--window-size=1920,1080'],
-    });
-    const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36',
-      viewport: { width: 1920, height: 1080 },
-      locale: 'en-US',
-      timezoneId: 'America/New_York',
-    });
-    await context.addInitScript(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => false });
-      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-    });
-    const page = await context.newPage();
-
-    const lensUrl = `https://lens.google.com/uploadbyurl?url=${encodeURIComponent(imageUrl)}`;
-    console.log(`🔍 Google Lens: ${imageUrl.substring(0, 50)}...`);
-    await page.goto(lensUrl, { waitUntil: 'load', timeout: 30000 });
-    await page.waitForTimeout(3000);
-
-    // Handle cookie consent if it appears
-    try {
-      const cookieBtn = page.locator('button:has-text("Accept"), button:has-text("Accept all"), button:has-text("I agree"), button[aria-label*="Accept"]').first();
-      if (await cookieBtn.count() > 0) { await cookieBtn.click({ timeout: 5000 }); await page.waitForTimeout(1000); }
-    } catch (e) {}
-
-    // Wait for Lens to process the image (spinner goes away / results appear)
-    // This can take 5-15 seconds
-    let processed = false;
-    for (let i = 0; i < 30; i++) {
-      const hasSpinner = await page.evaluate(() => {
-        // Check for various loading indicators
-        const spinners = document.querySelectorAll('[role="progressbar"], [class*="spinner"], [class*="loading"], [aria-busy="true"]');
-        const textElements = document.querySelectorAll('.S3t8J, .Vf0PKf, [class*="text-detected"], [class*="text-block"], [class*="lensText"], [data-test="text-results"]');
-        // If we have text results, we're done
-        if (textElements.length > 0) return false;
-        // If spinner is gone and page loaded, check text
-        if (spinners.length === 0) {
-          const body = document.body?.innerText || '';
-          // If we see content (not just spinner text), we're good
-          if (body.length > 300) return false;
-        }
-        return true; // still loading
-      });
-      if (!hasSpinner) { processed = true; break; }
-      await page.waitForTimeout(1000);
-    }
-
-    if (!processed) {
-      console.log('⚠️ Lens processing timed out, trying to extract anyway');
-    }
-
-    // Now extract the detected text
-    let lensText = await page.evaluate(() => {
-      // Multiple extraction strategies
-
-      // Strategy 1: Google Lens text result elements
-      const selectors = [
-        '.S3t8J', '.Vf0PKf',
-        '[class*="text-detected"]',
-        '[class*="text-block"]',
-        '[class*="lensText"]',
-        '[data-test="text-results"] span',
-        'div[role="tabpanel"] span',
-        'div[jsname] span',
-      ];
-      for (const sel of selectors) {
-        const els = document.querySelectorAll(sel);
-        if (els.length > 0) {
-          const texts = Array.from(els).map(el => el.textContent?.trim()).filter(Boolean);
-          if (texts.length > 0) return texts.join('\n');
-        }
+function downloadImage(url) {
+  return new Promise((resolve, reject) => {
+    const client = url.startsWith('https') ? https : http;
+    client.get(url, { headers: { 'User-Agent': UA, 'Referer': 'https://www.pinterest.com/' }, timeout: 15000 }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        return downloadImage(res.headers.location).then(resolve).catch(reject);
       }
-
-      // Strategy 2: Try clicking "Text" tab first then re-extract
-      const tabs = document.querySelectorAll('button, [role="tab"]');
-      for (const tab of tabs) {
-        if (tab.textContent?.toLowerCase().includes('text')) {
-          tab.click();
-          break;
-        }
-      }
-
-      // Strategy 3: Get all visible text
-      const body = document.body?.innerText || '';
-      return body.trim();
-    });
-
-    // Clean the text
-    lensText = lensText
-      .replace(/\s+/g, ' ')
-      .trim()
-      // Remove common Lens UI text that's not the actual result
-      .replace(/Text\s*Search\s*Translate\s*Homework\s*(Web|Images|Shopping|Videos|News|Maps|Books)/gi, '')
-      .replace(/Send feedback|About Google|Privacy|Terms|Help|Learn more|Feedback/gi, '')
-      .replace(/Google Lens.*?lens\s*\.\s*google/i, '')
-      .trim();
-
-    await context.close();
-    await browser.close();
-
-    if (lensText && lensText.length > 20) {
-      console.log(`✅ Lens text (${lensText.length} chars): ${lensText.substring(0, 80)}...`);
-      return { text: lensText, source: 'google_lens' };
-    }
-
-    // Fallback: if Lens gave us nothing useful, try Google Images reverse search
-    console.log('⚠️ Lens gave short/no text, trying Google Images...');
-    try {
-      const { text: fallbackText } = await extractTextViaGoogleImages(imageUrl);
-      if (fallbackText) {
-        return { text: fallbackText, source: 'google_images' };
-      }
-    } catch (e) {}
-
-    return { text: lensText || '', source: 'google_lens' };
-
-  } catch (err) {
-    console.error('❌ Lens error:', err.message?.substring(0, 80));
-    if (browser) await browser.close().catch(() => {});
-    // Fallback to Google Images
-    try {
-      const { text: fallbackText } = await extractTextViaGoogleImages(imageUrl);
-      if (fallbackText) return { text: fallbackText, source: 'google_images' };
-    } catch (e) {}
-    return { text: '', source: 'google_lens', error: err.message };
-  }
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => resolve(Buffer.concat(chunks)));
+      res.on('error', reject);
+    }).on('error', reject);
+  });
 }
 
 // ──────────────────────────────────────────────
-// Google Images Reverse Search (Fallback)
+// Enhanced OCR with Image Preprocessing
 // ──────────────────────────────────────────────
 
-async function extractTextViaGoogleImages(imageUrl) {
-  let browser;
+async function extractTextWithPreprocessing(imageUrl) {
   try {
-    browser = await chromium.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled', '--window-size=1920,1080'],
-    });
-    const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36',
-      viewport: { width: 1920, height: 1080 },
-      locale: 'en-US',
-    });
-    await context.addInitScript(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => false });
-      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-    });
-    const page = await context.newPage();
+    // Download the image
+    const buffer = await downloadImage(imageUrl);
+    if (!buffer || buffer.length < 100) return { text: '', confidence: 0, method: 'failed' };
 
-    await page.goto(`https://www.google.com/searchbyimage?image_url=${encodeURIComponent(imageUrl)}`, { waitUntil: 'load', timeout: 30000 });
-    await page.waitForTimeout(5000);
+    // Preprocess: convert to grayscale, increase contrast, resize for better OCR
+    const processed = await sharp(buffer)
+      .grayscale()
+      .normalize()
+      .resize(1600, null, { fit: 'inside', withoutEnlargement: true })
+      .sharpen()
+      .png()
+      .toBuffer();
 
-    // Wait for results to load
-    for (let i = 0; i < 20; i++) {
-      const ready = await page.evaluate(() => {
-        const text = document.body?.innerText || '';
-        return text.length > 500 && !text.includes('loading');
-      });
-      if (ready) break;
-      await page.waitForTimeout(1000);
+    // Try OCR on the preprocessed image
+    if (!ocrWorker) ocrWorker = await createWorker('eng', {
+      logger: () => {},
+      cacheMethod: 'write',
+    });
+    const { data } = await ocrWorker.recognize(processed);
+    const text = data.text?.trim() || '';
+    const confidence = data.confidence || 0;
+
+    if (text && text.length > 5) {
+      console.log(`✅ OCR (preprocessed): ${text.substring(0, 60)}... (conf: ${Math.round(confidence)})`);
+      return { text, confidence: Math.round(confidence), method: 'preprocessed_tesseract' };
     }
 
-    // Extract text snippets from the page — Google Images shows visually similar images
-    // and sometimes text snippets from the image
-    const text = await page.evaluate(() => {
-      // Get all text from the results section
-      const results = document.querySelectorAll('[data-hveid], .yG4QQe, .TbwUpd, .i0X6df, .LC20lb, .VwiC3b, span.st');
-      const texts = Array.from(results).map(el => el.textContent?.trim()).filter(Boolean);
-      return texts.join('\n');
-    });
+    // Fallback: try without preprocessing on original
+    const { data: data2 } = await ocrWorker.recognize(buffer);
+    const text2 = data2.text?.trim() || '';
+    if (text2) {
+      console.log(`✅ OCR (raw): ${text2.substring(0, 60)}...`);
+      return { text: text2, confidence: Math.round(data2.confidence || 0), method: 'raw_tesseract' };
+    }
 
-    await context.close();
-    await browser.close();
-    return { text };
+    return { text: '', confidence: 0, method: 'failed' };
 
   } catch (err) {
-    console.error('❌ Google Images error:', err.message?.substring(0, 80));
-    if (browser) await browser.close().catch(() => {});
-    return { text: '' };
+    console.error('❌ OCR error:', err.message?.substring(0, 80));
+    return { text: '', confidence: 0, method: 'error', error: err.message };
   }
+}
+
+async function extractTextViaLens(imageUrl) {
+  // Google blocks Lens from datacenter IPs (Render).
+  // Using enhanced Tesseract OCR with image preprocessing instead.
+  // This gives much better results than raw Tesseract.
+  console.log(`🔍 Extracting text: ${imageUrl.substring(0, 60)}...`);
+  const result = await extractTextWithPreprocessing(imageUrl);
+  if (result.text) {
+    console.log(`✅ ${result.method}: ${result.text.substring(0, 80)}...`);
+    return { text: result.text, source: result.method, confidence: result.confidence };
+  }
+  return { text: '', source: 'preprocessed_ocr', error: result.error || 'No text found' };
 }
 
 let ocrWorker = null;
@@ -510,48 +401,20 @@ let ocrWorker = null;
 app.post('/api/pinterest/ocr', async (req, res) => {
   try {
     const imageUrl = req.body?.url;
-    const method = req.body?.method || 'both'; // 'tesseract', 'google_lens', or 'both'
     if (!imageUrl) return res.status(400).json({ success: false, error: 'Missing "url"' });
-
-    let texts = [];
-
-    // Google Lens extraction
-    if (method === 'google_lens' || method === 'both') {
-      const lensResult = await extractTextViaLens(imageUrl);
-      if (lensResult.text) {
-        texts.push({ text: lensResult.text, source: 'google_lens' });
-      }
-    }
-
-    // Tesseract OCR fallback
-    if (method === 'tesseract' || method === 'both') {
-      if (!ocrWorker) ocrWorker = await createWorker('eng');
-      const { data } = await ocrWorker.recognize(imageUrl);
-      if (data.text?.trim()) {
-        texts.push({ text: data.text.trim(), source: 'tesseract', confidence: data.confidence || 0 });
-      }
-    }
-
-    if (texts.length === 0) {
-      return res.status(500).json({ success: false, error: 'No text extracted' });
-    }
-
-    // If both methods gave text, return the better one
-    const response = { success: true, results: texts };
-    // For backwards compatibility, if you just want the best text
-    if (texts.length === 1 || req.body?.method !== 'both') {
-      response.text = texts[0].text;
-      response.source = texts[0].source;
-      if (texts[0].confidence) response.confidence = texts[0].confidence;
-    }
-
-    res.json(response);
+    const result = await extractTextWithPreprocessing(imageUrl);
+    res.json({
+      success: !!result.text,
+      text: result.text,
+      confidence: result.confidence || 0,
+      method: result.method || 'tesseract',
+    });
   } catch (err) {
     res.status(500).json({ success: false, error: 'OCR failed', details: err.message });
   }
 });
 
-// ⭐ Google Lens only endpoint — faster, no Tesseract overhead
+// ⭐ Lens endpoint — now uses preprocessed OCR since Google blocks datacenter IPs
 app.post('/api/pinterest/lens', async (req, res) => {
   try {
     const imageUrl = req.body?.url;
