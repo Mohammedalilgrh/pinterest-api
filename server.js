@@ -404,3 +404,11 @@ app.listen(PORT, async () => {
 
 process.on('SIGTERM', () => process.exit(0));
 process.on('SIGINT', () => process.exit(0));
+
+// Prevent crashes from killing the server
+process.on('uncaughtException', (err) => {
+  console.error('💥 Uncaught:', err.message?.substring(0, 100));
+});
+process.on('unhandledRejection', (err) => {
+  console.error('💥 Unhandled:', err.message?.substring(0, 100));
+});
