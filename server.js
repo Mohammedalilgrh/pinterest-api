@@ -1,13 +1,18 @@
-const express = require('express');
-const { chromium } = require('playwright-extra');
-const stealth = require('puppeteer-extra-plugin-stealth')();
-chromium.use(stealth);
+import express from 'express';
+import { chromium } from 'playwright-extra';
+import stealthPlugin from 'puppeteer-extra-plugin-stealth';
 import Lens from 'chrome-lens-ocr';
 import dotenv from 'dotenv';
-const cors = require('cors');
-const fs = require('fs');
-const path = require('path');
-const axios = require('axios'); // For fetching image data as buffer
+import cors from 'cors';
+import fs from 'fs';
+import path from 'path';
+import https from 'https';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+chromium.use(stealthPlugin());
 
 dotenv.config();
 
@@ -30,14 +35,30 @@ const lens = new Lens({
   userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 });
 
-function checkIfMeaningful(text) {
+function containsArabic(text) {
+  return /[؀-ۿ]/.test(text);
+}
+
+function containsEnglish(text) {
+  return /[a-zA-Z]/.test(text);
+}
+
+function detectQueryLanguage(query) {
+  return containsArabic(query) ? 'arabic' : 'english';
+}
+
+function checkIfMeaningful(text, targetLang = null) {
   const minWords = 5;
   const minChars = 20;
-  const hasLetters = /[a-zA-Z؀-ۿ]/.test(text); // Checks for English or Arabic letters
+  const hasLetters = /[a-zA-Z؀-ۿ]/.test(text);
   const isMostlyAlphaNumeric = (text.replace(/[^a-zA-Z0-9؀-ۿ\s]/g, '').length / text.length) > 0.7;
   const wordCount = text.split(/\s+/).filter(Boolean).length;
 
-  return text.length >= minChars && wordCount >= minWords && hasLetters && isMostlyAlphaNumeric;
+  if (!(text.length >= minChars && wordCount >= minWords && hasLetters && isMostlyAlphaNumeric)) return false;
+
+  if (targetLang === 'arabic') return containsArabic(text);
+  if (targetLang === 'english') return containsEnglish(text);
+  return true;
 }
 
 async function extractTextWithLens(imageUrl) {
@@ -68,7 +89,7 @@ async function loginToPinterest() {
     browser = await chromium.launch({
       headless: true,
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
-      timeout: 20000, // Don't let browser launch hang forever
+      timeout: 20000,
     });
     const context = await browser.newContext({
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
@@ -103,7 +124,6 @@ async function loginToPinterest() {
     const currentUrl = page.url();
     if (currentUrl.includes('login') && !currentUrl.includes('search')) {
       console.log('❌ Login failed - still on login page');
-      // Save cookies anyway (might have partial session)
     } else {
       console.log('✅ Pinterest login successful!');
     }
@@ -125,7 +145,6 @@ async function loginToPinterest() {
 // Pinterest Search
 // ──────────────────────────────────────────────
 
-// HUGE pool of real search terms — every combination returns real Pinterest results
 const RELATED_TERMS = [
   'aesthetic','art','beautiful','best','bold','bright','calm','chill','classic',
   'cool','creative','cute','daily','deep','dream','epic','famous','fantastic',
@@ -147,11 +166,15 @@ let searchCounter = Date.now();
 let lastPickedIndex = -1;
 
 function buildFreshQuery(query) {
-  // NEVER let Pinterest see the same query twice.
-  // We use the user's query as the niche, then append a real word that
-  // Pinterest actually has results for - plus a rotating timestamp.
+  const targetLang = detectQueryLanguage(query);
 
-  // Pick a word different from the last one
+  // For Arabic queries — skip English filler words, use counter only
+  if (targetLang === 'arabic') {
+    searchCounter++;
+    return `${query} ${searchCounter}`;
+  }
+
+  // For English queries — keep freshness words
   let idx;
   do {
     idx = Math.floor(Math.random() * RELATED_TERMS.length);
@@ -161,24 +184,17 @@ function buildFreshQuery(query) {
   const word = RELATED_TERMS[idx];
   searchCounter++;
 
-  // Pinterest treats "quotes" as the main query and ignores extra text
-  // But the unique number forces Pinterest's CDN to serve fresh results
-  // instead of returning cached JSON
   return `${query} ${word} ${searchCounter}`;
 }
 
-// Track seen pin IDs to avoid duplicates across requests in the same session
 const seenPinIds = new Set();
-let sessionFreshnessCounter = 0;
 
 async function searchPinterest(query, limit = 10, bookmark = null) {
   const maxResults = Math.min(limit, 50);
   let allPins = [];
   let nextBookmark = null;
 
-  // Try up to 3 times with different queries if we keep getting seen pins
   for (let attempt = 0; attempt < 3 && allPins.length < maxResults; attempt++) {
-    // Build the ACTUAL Pinterest search query with freshness injection
     const freshPinterestQuery = buildFreshQuery(query);
 
     let browser;
@@ -194,7 +210,6 @@ async function searchPinterest(query, limit = 10, bookmark = null) {
         viewport: { width: 1920, height: 1080 },
       });
 
-      // Load saved cookies
       if (fs.existsSync(STATE_FILE)) {
         try {
           const cookies = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
@@ -205,7 +220,6 @@ async function searchPinterest(query, limit = 10, bookmark = null) {
       const page = await context.newPage();
       let attemptPins = [];
 
-      // Intercept Pinterest's internal API to capture search responses
       page.on('response', async (response) => {
         const url = response.url();
         if (url.includes('BaseSearchResource/get') && response.status() === 200) {
@@ -214,7 +228,6 @@ async function searchPinterest(query, limit = 10, bookmark = null) {
             const resourceData = json?.resource_response?.data;
             const results = resourceData?.results || [];
 
-            // Capture the bookmark for pagination
             if (resourceData?.bookmark) {
               nextBookmark = resourceData.bookmark;
             }
@@ -234,7 +247,6 @@ async function searchPinterest(query, limit = 10, bookmark = null) {
         }
       });
 
-      // Build search URL
       let searchUrl = `https://www.pinterest.com/search/pins/?q=${encodeURIComponent(freshPinterestQuery)}&rs=typed`;
       if (bookmark) {
         searchUrl += `&bookmark=${encodeURIComponent(bookmark)}`;
@@ -243,7 +255,6 @@ async function searchPinterest(query, limit = 10, bookmark = null) {
       await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
       await page.waitForTimeout(5000);
 
-      // Scroll to load more pins
       for (let i = 0; i < 5 && attemptPins.length < maxResults; i++) {
         await page.evaluate(() => window.scrollBy(0, 800));
         await page.waitForTimeout(1500);
@@ -252,7 +263,6 @@ async function searchPinterest(query, limit = 10, bookmark = null) {
       await context.close();
       await browser.close();
 
-      // Filter out already-seen pins
       for (const pin of attemptPins) {
         if (allPins.length >= maxResults) break;
         if (pin.id && !seenPinIds.has(pin.id)) {
@@ -268,7 +278,6 @@ async function searchPinterest(query, limit = 10, bookmark = null) {
     }
   }
 
-  // Clear seen IDs periodically so memory doesn't grow forever (~200KB per 5000 IDs)
   if (seenPinIds.size > 5000) {
     seenPinIds.clear();
     console.log('Cleared seen pin cache (5000 limit reached)');
@@ -296,7 +305,6 @@ app.get('/api/pinterest/search', async (req, res) => {
 
     const result = await searchPinterest(query, count, bookmark);
 
-    // Apply image size
     const data = result.pins.map(pin => {
       let img = pin.image;
       if (img) {
@@ -325,7 +333,6 @@ app.get('/api/pinterest/download', async (req, res) => {
     const imageUrl = req.query.url;
     if (!imageUrl) return res.status(400).json({ success: false, error: 'Missing ?url=' });
 
-    const https = require('https');
     https.get(imageUrl, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -345,7 +352,6 @@ app.get('/api/pinterest/download', async (req, res) => {
     res.status(500).json({ success: false, error: 'Download failed' });
   }
 });
-
 
 app.post('/api/pinterest/ocr', async (req, res) => {
   try {
@@ -379,7 +385,6 @@ app.post('/api/pinterest/lens', async (req, res) => {
   }
 });
 
-// New powerful search endpoint
 app.get('/api/pinterest/search-with-ocr', async (req, res) => {
   try {
     const query = req.query.q || req.query.query || req.query.search;
@@ -389,17 +394,17 @@ app.get('/api/pinterest/search-with-ocr', async (req, res) => {
 
     const count = parseInt(req.query.count || req.query.limit || '10', 10);
     const size = req.query.size || 'medium';
-    const bookmark = req.query.bookmark || null;
+    const targetLang = detectQueryLanguage(query);
 
-    console.log(`🔍 Searching with OCR: "${query}" (count: ${count})`);
+    console.log(`🔍 Searching with OCR: "${query}" (count: ${count}, lang: ${targetLang})`);
 
     let attempts = 0;
-    const maxAttempts = 5; // Try to find a meaningful image up to 5 times
+    const maxAttempts = 10;
     let meaningfulPins = [];
 
     while (meaningfulPins.length < count && attempts < maxAttempts) {
       attempts++;
-      const searchResult = await searchPinterest(query, 1, bookmark); // Get 1 pin at a time
+      const searchResult = await searchPinterest(query, 1, null);
       const pins = searchResult.pins;
 
       if (pins.length === 0) {
@@ -419,24 +424,25 @@ app.get('/api/pinterest/search-with-ocr', async (req, res) => {
         const ocrResult = await extractTextWithLens(imgUrl);
         const extractedText = ocrResult.text;
 
-        if (checkIfMeaningful(extractedText)) {
-          console.log(`✅ Meaningful text found for pin ${pin.id}: ${extractedText.substring(0, 50)}...`);
+        const isMeaningful = checkIfMeaningful(extractedText, targetLang);
+
+        if (isMeaningful) {
+          console.log(`✅ ${targetLang} text found for pin ${pin.id}: ${extractedText.substring(0, 50)}...`);
           meaningfulPins.push({
             ...pin,
             image: imgUrl,
             extractedText: extractedText,
             language: ocrResult.language,
-            lenstext_full: extractedText, // For n8n output requirement
+            langMatch: true,
+            lenstext_full: extractedText,
           });
         } else {
-          console.log(`❌ Text not meaningful for pin ${pin.id}: ${extractedText.substring(0, 50)}... Re-searching...`);
+          console.log(`❌ Text not meaningful for pin ${pin.id}: ${extractedText.substring(0, 50)}... Searching next...`);
         }
       }
-      // Update bookmark for next iteration if needed
+
       if (searchResult.bookmark) {
         bookmark = searchResult.bookmark;
-      } else if (pins.length > 0) { // If no new bookmark, but pins were found, try next attempt without bookmark
-        console.log('No new bookmark, but more pins might exist. Continuing search without bookmark.');
       } else {
         console.log('No more pins to search. Ending attempts.');
         break;
@@ -447,7 +453,7 @@ app.get('/api/pinterest/search-with-ocr', async (req, res) => {
       success: true,
       query,
       count: meaningfulPins.length,
-      hasMore: meaningfulPins.length === count && attempts < maxAttempts, // Indicate if more could be fetched
+      hasMore: meaningfulPins.length >= count,
       bookmark: bookmark || '',
       data: meaningfulPins,
     });
@@ -465,9 +471,9 @@ app.get('/', (req, res) => {
       search: 'GET /api/pinterest/search?q=YOUR_QUERY&count=10&size=medium',
       bookmark: 'Pass &bookmark=VALUE from previous response for next page',
       download: 'GET /api/pinterest/download?url=IMAGE_URL',
-      ocr: 'POST /api/pinterest/ocr { "url": "IMAGE_URL" } (Uses Google Lens for cleaner text)',
-      lens: 'POST /api/pinterest/lens { "url": "IMAGE_URL" } (Google Lens ONLY - cleaner text)',
-      searchWithOcr: 'GET /api/pinterest/search-with-ocr?q=YOUR_QUERY&count=10&size=medium (Searches Pinterest and extracts meaningful text using Google Lens, re-searching if needed)',
+      ocr: 'POST /api/pinterest/ocr { "url": "IMAGE_URL" }',
+      lens: 'POST /api/pinterest/lens { "url": "IMAGE_URL" } (Google Lens ONLY)',
+      searchWithOcr: 'GET /api/pinterest/search-with-ocr?q=YOUR_QUERY&count=10&size=medium (Smart search with language-aware OCR filtering)',
     },
   });
 });
@@ -482,8 +488,6 @@ app.listen(PORT, () => {
   console.log(`║  Port: ${PORT}                      ║`);
   console.log(`╚════════════════════════════════╝\n`);
   if (PINTEREST_EMAIL && PINTEREST_PASSWORD) {
-    // Run login in background — don't block the first response
-    // Render's health check needs an immediate 200
     loginToPinterest().catch(err => {
       console.error('Background login failed (non-fatal):', err.message?.substring(0, 100));
     });
@@ -499,7 +503,6 @@ app.listen(PORT, () => {
 process.on('SIGTERM', () => process.exit(0));
 process.on('SIGINT', () => process.exit(0));
 
-// Prevent crashes from killing the server
 process.on('uncaughtException', (err) => {
   console.error('💥 Uncaught:', err.message?.substring(0, 100));
 });
