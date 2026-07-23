@@ -23,7 +23,7 @@ This project provides an advanced Pinterest API integration capable of performin
     -   Enforces minimum alphanumeric character density.
     -   Detects and filters out error messages, code snippets, and irrelevant text.
     -   Handles various sentence terminators (`.`, `!`, `?`, `\n`).
--   **Unified Endpoint for n8n:** A single HTTP endpoint (`/api/pinterest/search-and-lens`) that performs a Pinterest search, then iteratively applies OCR and lensing to the results, returning only pins with high-quality extracted text.
+-   **Unified Endpoint for n8n (Search & Lens):** A single HTTP endpoint (`/api/pinterest/search-and-lens`) that performs a Pinterest search, then iteratively applies OCR and lensing to the results, returning only pins with high-quality extracted text. This is perfect for automation workflows.
 -   **Easy Deployment:** Optimized for deployment on platforms like Render for continuous, free webhook service.
 
 ## Getting Started
