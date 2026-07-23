@@ -392,60 +392,74 @@ app.get('/api/pinterest/search-with-ocr', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Missing ?q parameter' });
     }
 
-    const count = parseInt(req.query.count || req.query.limit || '10', 10);
+    const count = parseInt(req.query.count || req.query.limit || '5', 10);
     const size = req.query.size || 'medium';
     const targetLang = detectQueryLanguage(query);
 
-    console.log(`🔍 Searching with OCR: "${query}" (count: ${count}, lang: ${targetLang})`);
+    console.log(`🔍 Search+OCR: "${query}" (need: ${count}, lang: ${targetLang})`);
 
     let attempts = 0;
-    const maxAttempts = 10;
+    const maxAttempts = 5;
     let meaningfulPins = [];
     let bookmark = req.query.bookmark || null;
 
     while (meaningfulPins.length < count && attempts < maxAttempts) {
       attempts++;
-      const searchResult = await searchPinterest(query, 1, bookmark);
+
+      // Get a batch of pins each attempt — much faster than 1 at a time
+      const batchSize = Math.max(count * 2, 10);
+      const searchResult = await searchPinterest(query, batchSize, bookmark);
       const pins = searchResult.pins;
 
-      if (pins.length === 0) {
-        console.log('No more pins found in search result. Ending attempts.');
+      if (!pins || pins.length === 0) {
+        console.log(`Attempt ${attempts}: no pins found, ending.`);
         break;
       }
 
+      // Save bookmark for next iteration
+      if (searchResult.bookmark) {
+        bookmark = searchResult.bookmark;
+      } else {
+        // No more pages — stop after this batch
+        console.log(`Attempt ${attempts}: no more pages after this batch.`);
+      }
+
+      console.log(`Attempt ${attempts}: checking ${pins.length} pins with OCR...`);
+
       for (const pin of pins) {
         if (meaningfulPins.length >= count) break;
+        if (!pin.image) continue;
 
         let imgUrl = pin.image;
-        if (imgUrl) {
-          if (size === 'small') imgUrl = imgUrl.replace(/\/\d+x\//, '/236x/');
-          else if (size === 'medium') imgUrl = imgUrl.replace(/\/\d+x\//, '/564x/');
-        }
+        if (size === 'small') imgUrl = imgUrl.replace(/\/\d+x\//, '/236x/');
+        else if (size === 'medium') imgUrl = imgUrl.replace(/\/\d+x\//, '/564x/');
 
         const ocrResult = await extractTextWithLens(imgUrl);
-        const extractedText = ocrResult.text;
+        const extractedText = (ocrResult.text || '').trim();
 
-        const isMeaningful = checkIfMeaningful(extractedText, targetLang);
+        if (!extractedText) {
+          console.log(`  ⏭️  Pin ${pin.id}: empty OCR`);
+          continue;
+        }
 
-        if (isMeaningful) {
-          console.log(`✅ ${targetLang} text found for pin ${pin.id}: ${extractedText.substring(0, 50)}...`);
+        if (checkIfMeaningful(extractedText, targetLang)) {
+          console.log(`  ✅ Pin ${pin.id}: ${extractedText.substring(0, 60)}...`);
           meaningfulPins.push({
             ...pin,
             image: imgUrl,
-            extractedText: extractedText,
+            extractedText,
             language: ocrResult.language,
             langMatch: true,
             lenstext_full: extractedText,
           });
         } else {
-          console.log(`❌ Text not meaningful for pin ${pin.id}: ${extractedText.substring(0, 50)}... Searching next...`);
+          console.log(`  ❌ Pin ${pin.id}: wrong/no text — "${extractedText.substring(0, 40)}..."`);
         }
       }
 
-      if (searchResult.bookmark) {
-        bookmark = searchResult.bookmark;
-      } else {
-        console.log('No more pins to search. Ending attempts.');
+      // If no bookmark and still need more pins, stop
+      if (!searchResult.bookmark) {
+        console.log(`No bookmark — searched all available pages.`);
         break;
       }
     }
