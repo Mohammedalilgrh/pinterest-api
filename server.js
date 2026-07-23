@@ -1,7 +1,6 @@
 import express from 'express';
 import { chromium } from 'playwright-extra';
 import stealthPlugin from 'puppeteer-extra-plugin-stealth';
-import Lens from 'chrome-lens-ocr';
 import dotenv from 'dotenv';
 import cors from 'cors';
 import fs from 'fs';
@@ -22,18 +21,10 @@ const PINTEREST_EMAIL = process.env.PINTEREST_EMAIL || '';
 const PINTEREST_PASSWORD = process.env.PINTEREST_PASSWORD || '';
 const STATE_FILE = path.join(__dirname, 'pinterest_auth.json');
 
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
-
 app.use(cors());
 app.use(express.json({ limit: '5mb' }));
 
 let loggedIn = false;
-
-// Initialize Lens instance
-const lens = new Lens({
-  chromeVersion: '124.0.6367.60',
-  userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
-});
 
 function containsArabic(text) {
   return /[؀-ۿ]/.test(text);
@@ -49,100 +40,167 @@ function detectQueryLanguage(query) {
 
 function checkIfMeaningful(text, targetLang = null) {
   if (!text || text.trim().length < 3) return false;
-
   const hasLetters = /[a-zA-Z؀-ۿ]/.test(text);
-  const wordCount = text.split(/\s+/).filter(Boolean).length;
-
-  // Very lenient — accept 2+ words with any real letters
-  if (!(wordCount >= 2 && hasLetters)) return false;
-
-  if (targetLang === 'arabic') {
-    // Accept Arabic OR English — we just want real text
-    return /[؀-ۿ]/.test(text) || /[a-zA-Z]/.test(text);
-  }
-  if (targetLang === 'english') {
-    return /[a-zA-Z]/.test(text);
-  }
+  if (!hasLetters) return false;
+  if (targetLang === 'arabic') return /[؀-ۿ]/.test(text) || /[a-zA-Z]/.test(text);
+  if (targetLang === 'english') return /[a-zA-Z]/.test(text);
   return true;
 }
 
-async function extractTextWithLens(imageUrl) {
+// ──────────────────────────────────────────────
+// OCR: Extract text from Pinterest pin page
+// This is MUCH more reliable than chrome-lens-ocr
+// ──────────────────────────────────────────────
+
+async function extractTextFromPinPage(pinUrl) {
+  let browser;
   try {
-    console.log(`🔍 Lens OCR: ${imageUrl.substring(0, 60)}...`);
-    const result = await lens.scanByURL(imageUrl);
+    browser = await chromium.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+      timeout: 20000,
+    });
+    const context = await browser.newContext({
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+    });
 
-    // Try multiple ways to get ALL text from Lens result
-    let text = '';
-
-    // Method 1: segments array (each has .text)
-    if (result.segments && Array.isArray(result.segments) && result.segments.length > 0) {
-      text = result.segments.map(s => s.text || '').filter(Boolean).join('\n');
-    }
-
-    // Method 2: fullText or rawText field (sometimes has everything in one string)
-    if (!text || text.length < 10) {
-      const fullText = result.fullText || result.rawText || result.text || '';
-      if (fullText.length > text.length) {
-        text = fullText;
-      }
-    }
-
-    // Method 3: concatenate ALL string fields in the result object
-    if (!text || text.length < 10) {
-      const allParts = [];
-      for (const key of Object.keys(result)) {
-        if (typeof result[key] === 'string' && result[key].length > 5) {
-          allParts.push(result[key]);
-        }
-        if (Array.isArray(result[key])) {
-          for (const item of result[key]) {
-            if (typeof item === 'string') allParts.push(item);
-            if (item && typeof item.text === 'string') allParts.push(item.text);
-            if (item && typeof item.content === 'string') allParts.push(item.content);
-            if (item && typeof item.value === 'string') allParts.push(item.value);
-          }
-        }
-      }
-      if (allParts.length > 0) {
-        const combined = allParts.join('\n');
-        if (combined.length > text.length) {
-          text = combined;
-        }
-      }
-    }
-
-    // Method 4: raw response object — dump anything that looks like text
-    if (!text || text.length < 10) {
+    // Load saved cookies if available
+    if (fs.existsSync(STATE_FILE)) {
       try {
-        const raw = JSON.stringify(result);
-        // Try to extract meaningful text content from serialized response
-        const lines = [];
-        const seen = new Set();
-        // Find all string values in the JSON
-        const matches = raw.match(/"text":"([^"]+)"/g);
-        if (matches) {
-          for (const m of matches) {
-            const v = JSON.parse(m.match(/(\{.*)/)?.[0] || m).text || m.match(/:(".*")$/)?.[1] || '';
-            const decoded = v.replace(/^"|"$/g, '');
-            if (decoded.length > 3 && !seen.has(decoded)) {
-              seen.add(decoded);
-              lines.push(decoded);
-            }
-          }
-        }
-        if (lines.length > 0) {
-          text = lines.join('\n');
-        }
+        const cookies = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+        await context.addCookies(cookies);
       } catch (e) {}
     }
 
-    const firstLine = text.split('\n')[0] || '';
-    console.log(`✅ Lens OCR: extracted ${text.length} chars, first: "${firstLine.substring(0, 80)}..." (lang: ${result.language || 'N/A'})`);
+    const page = await context.newPage();
+    console.log(`  📄 Opening pin page: ${pinUrl.substring(0, 60)}...`);
+    await page.goto(pinUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    await page.waitForTimeout(3000);
 
-    // Return the FULL text — use newline as separator for multi-line quotes
-    return { text, language: result.language };
+    let text = '';
+
+    // Method 1: Get page title (Pinterest often puts text in <title>)
+    text = await page.title();
+
+    // Method 2: Extract meta description (og:description, twitter:description)
+    if (!text || text.length < 10) {
+      text = await page.evaluate(() => {
+        const meta = document.querySelector('meta[property="og:description"]') ||
+                     document.querySelector('meta[name="description"]') ||
+                     document.querySelector('meta[property="twitter:description"]');
+        return meta ? meta.content : '';
+      });
+    }
+
+    // Method 3: Extract from Pinterest's rich pin data (the text content area)
+    if (!text || text.length < 10) {
+      // Try various selectors Pinterest uses for pin text content
+      text = await page.evaluate(() => {
+        // Try common Pinterest selectors for the pin text/description
+        const selectors = [
+          '[data-test-id="richPinInformation"]',
+          '[data-test-id="pinDescription"]',
+          '[data-test-id="pinsDescriptionId"]',
+          'div[class*="PinDescription"]',
+          'div[class*="pinDescription"]',
+          'span[class*="description"]',
+          // Try any large text blocks on the page
+          'div[class*="text"] span',
+          'article p',
+        ];
+        for (const sel of selectors) {
+          const el = document.querySelector(sel);
+          if (el && el.textContent.trim().length > 10) {
+            return el.textContent.trim();
+          }
+        }
+        return '';
+      });
+    }
+
+    // Method 4: Try extracting alt text from the main pin image
+    if (!text || text.length < 10) {
+      text = await page.evaluate(() => {
+        const imgs = document.querySelectorAll('img');
+        for (const img of imgs) {
+          if (img.alt && img.alt.length > 20) return img.alt;
+        }
+        return '';
+      });
+    }
+
+    // Method 5: Extract structured data / JSON-LD from the page
+    if (!text || text.length < 10) {
+      text = await page.evaluate(() => {
+        const scripts = document.querySelectorAll('script[type="application/ld+json"]');
+        for (const script of scripts) {
+          try {
+            const data = JSON.parse(script.textContent);
+            const desc = data?.description || data?.caption || data?.text || '';
+            if (desc.length > 10) return desc;
+          } catch (e) {}
+        }
+        return '';
+      });
+    }
+
+    // Method 6: Get the alt text from the image on the pin page
+    if (!text || text.length < 10) {
+      text = await page.evaluate(() => {
+        const img = document.querySelector('div[data-test-id="closeup-image"] img');
+        return img ? img.alt || '' : '';
+      });
+    }
+
+    await context.close();
+    await browser.close();
+
+    // Clean up the text — remove Pinterest suffixes like " — Pinterest"
+    if (text) {
+      text = text.replace(/ - Pinterest$/, '').replace(/ — Pinterest$/, '').trim();
+    }
+
+    console.log(`  📄 Pin page text: "${(text || '[empty]').substring(0, 100)}" (${text ? text.length : 0} chars)`);
+    return text || '';
   } catch (err) {
-    console.error('❌ Lens OCR error:', err.message?.substring(0, 80));
+    console.log(`  ⚠️  Pin page extraction failed: ${err.message?.substring(0, 50)}`);
+    if (browser) await browser.close().catch(() => {});
+    return '';
+  }
+}
+
+async function extractTextFromImageDirect(imageUrl) {
+  // Try to get alt text and context from the image URL directly
+  // Pinterest image URLs don't have text in them, so this is just a placeholder
+  return '';
+}
+
+async function extractTextWithLens(imageUrl, pinUrl) {
+  try {
+    console.log(`🔍 OCR: ${imageUrl.substring(0, 60)}...`);
+
+    let text = '';
+
+    // Strategy 1: If we have a pin URL, extract text from the Pinterest pin page
+    // This is the most reliable method for Pinterest quote pins
+    if (pinUrl) {
+      text = await extractTextFromPinPage(pinUrl);
+    }
+
+    // Strategy 2: Use Pinterest description from our search results
+    // (We already have this from pin.description — passed separately)
+
+    if (text && text.length > 5) {
+      console.log(`✅ OCR: ${text.length} chars — "${text.substring(0, 80)}..."`);
+      // Check if it has Arabic
+      const lang = containsArabic(text) ? 'arabic' : containsEnglish(text) ? 'english' : 'unknown';
+      return { text, language: lang };
+    }
+
+    console.log(`⚠️  OCR returned empty for this image`);
+    return { text: '', language: 'unknown' };
+  } catch (err) {
+    console.error('❌ OCR error:', err.message?.substring(0, 80));
     return { text: '', language: '', error: err.message };
   }
 }
@@ -174,7 +232,6 @@ async function loginToPinterest() {
     await page.goto('https://www.pinterest.com/login/', { waitUntil: 'networkidle', timeout: 30000 });
     await page.waitForTimeout(2000);
 
-    // Fill credentials
     await page.evaluate(({ email, password }) => {
       const emailInput = document.querySelector('input#email') || document.querySelector('input[type="email"]');
       const passInput = document.querySelector('input#password') || document.querySelector('input[type="password"]');
@@ -184,7 +241,6 @@ async function loginToPinterest() {
 
     await page.waitForTimeout(500);
 
-    // Click login button
     await page.evaluate(() => {
       const btn = document.querySelector('button[type="submit"]');
       if (btn) btn.click();
@@ -193,7 +249,6 @@ async function loginToPinterest() {
     await page.waitForTimeout(5000);
     await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
 
-    // Check if login succeeded
     const currentUrl = page.url();
     if (currentUrl.includes('login') && !currentUrl.includes('search')) {
       console.log('❌ Login failed - still on login page');
@@ -201,7 +256,6 @@ async function loginToPinterest() {
       console.log('✅ Pinterest login successful!');
     }
 
-    // Save cookies
     const cookies = await context.cookies();
     fs.writeFileSync(STATE_FILE, JSON.stringify(cookies, null, 2));
     loggedIn = true;
@@ -218,7 +272,6 @@ async function loginToPinterest() {
 // Pinterest Search
 // ──────────────────────────────────────────────
 
-// Arabic search terms to append for better Arabic results
 const ARABIC_TERMS = [
   'اقتباس','حكمة','مقولة','كلام','خواطر','عبارات','شعر','أدب','مواعظ',
   'نصيحة','تأمل','إلهام','تحفيز','نجاح','حياة','قوة','أمل','حب',
@@ -250,14 +303,12 @@ let lastPickedIndex = -1;
 function buildFreshQuery(query) {
   const targetLang = detectQueryLanguage(query);
 
-  // For Arabic queries — append Arabic search terms that help Pinterest return text-heavy results
   if (targetLang === 'arabic') {
     const word = ARABIC_TERMS[Math.floor(Math.random() * ARABIC_TERMS.length)];
     searchCounter++;
     return `${query} ${word}`;
   }
 
-  // For English queries — keep freshness words
   let idx;
   do {
     idx = Math.floor(Math.random() * RELATED_TERMS.length);
@@ -317,13 +368,13 @@ async function searchPinterest(query, limit = 10, bookmark = null) {
 
             for (const pin of results) {
               if (attemptPins.length >= maxResults * 2) break;
-              let image = pin.images?.orig?.url || pin.images?.['564x']?.url || pin.images?.['736x']?.url || pin.images?.['236x']?.url || '';
+              const image = pin.images?.orig?.url || pin.images?.['564x']?.url || pin.images?.['736x']?.url || pin.images?.['236x']?.url || '';
               attemptPins.push({
                 id: pin.id || '',
                 title: pin.title || pin.grid_title || '',
                 description: pin.description || pin.pin_description || pin.rich_summary?.display_description || '',
                 image,
-                link: pin.link || `https://www.pinterest.com/pin/${pin.id}/`,
+                link: `https://www.pinterest.com/pin/${pin.id}/`,
               });
             }
           } catch (e) {}
@@ -376,15 +427,11 @@ async function searchPinterest(query, limit = 10, bookmark = null) {
 app.get('/api/pinterest/search', async (req, res) => {
   try {
     const query = req.query.q || req.query.query || req.query.search;
-    if (!query) {
-      return res.status(400).json({ success: false, error: 'Missing ?q parameter' });
-    }
+    if (!query) return res.status(400).json({ success: false, error: 'Missing ?q parameter' });
 
     const count = parseInt(req.query.count || req.query.limit || '10', 10);
     const size = req.query.size || 'medium';
     const bookmark = req.query.bookmark || null;
-
-    console.log(`🔍 Searching: "${query}" (count: ${count})`);
 
     const result = await searchPinterest(query, count, bookmark);
 
@@ -397,16 +444,8 @@ app.get('/api/pinterest/search', async (req, res) => {
       return { ...pin, image: img };
     });
 
-    res.json({
-      success: true,
-      query,
-      count: data.length,
-      hasMore: !!result.bookmark,
-      bookmark: result.bookmark || '',
-      data,
-    });
+    res.json({ success: true, query, count: data.length, hasMore: !!result.bookmark, bookmark: result.bookmark || '', data });
   } catch (err) {
-    console.error('Search endpoint error:', err.message);
     res.json({ success: true, query: req.query.q || '', count: 0, hasMore: false, bookmark: '', data: [] });
   }
 });
@@ -417,17 +456,10 @@ app.get('/api/pinterest/download', async (req, res) => {
     if (!imageUrl) return res.status(400).json({ success: false, error: 'Missing ?url=' });
 
     https.get(imageUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Referer': 'https://www.pinterest.com/',
-      },
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', 'Referer': 'https://www.pinterest.com/' },
     }, (response) => {
-      if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
-        return res.redirect(response.headers.location);
-      }
-      if (response.statusCode !== 200) {
-        return res.status(500).json({ success: false, error: 'Download failed' });
-      }
+      if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) return res.redirect(response.headers.location);
+      if (response.statusCode !== 200) return res.status(500).json({ success: false, error: 'Download failed' });
       res.setHeader('Content-Type', response.headers['content-type'] || 'image/jpeg');
       response.pipe(res);
     }).on('error', () => res.status(500).json({ success: false, error: 'Download failed' }));
@@ -439,14 +471,10 @@ app.get('/api/pinterest/download', async (req, res) => {
 app.post('/api/pinterest/ocr', async (req, res) => {
   try {
     const imageUrl = req.body?.url;
+    const pinUrl = req.body?.pinUrl;
     if (!imageUrl) return res.status(400).json({ success: false, error: 'Missing "url"' });
-    const result = await extractTextWithLens(imageUrl);
-    res.json({
-      success: !!result.text,
-      text: result.text,
-      language: result.language,
-      error: result.error || null,
-    });
+    const result = await extractTextWithLens(imageUrl, pinUrl);
+    res.json({ success: !!result.text, text: result.text, language: result.language, error: result.error || null });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -455,14 +483,10 @@ app.post('/api/pinterest/ocr', async (req, res) => {
 app.post('/api/pinterest/lens', async (req, res) => {
   try {
     const imageUrl = req.body?.url;
+    const pinUrl = req.body?.pinUrl;
     if (!imageUrl) return res.status(400).json({ success: false, error: 'Missing "url"' });
-    const result = await extractTextWithLens(imageUrl);
-    res.json({
-      success: !!result.text,
-      text: result.text,
-      language: result.language,
-      error: result.error || null,
-    });
+    const result = await extractTextWithLens(imageUrl, pinUrl);
+    res.json({ success: !!result.text, text: result.text, language: result.language, error: result.error || null });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -471,9 +495,7 @@ app.post('/api/pinterest/lens', async (req, res) => {
 app.get('/api/pinterest/search-with-ocr', async (req, res) => {
   try {
     const query = req.query.q || req.query.query || req.query.search;
-    if (!query) {
-      return res.status(400).json({ success: false, error: 'Missing ?q parameter' });
-    }
+    if (!query) return res.status(400).json({ success: false, error: 'Missing ?q parameter' });
 
     const count = parseInt(req.query.count || req.query.limit || '5', 10);
     const size = req.query.size || 'medium';
@@ -490,81 +512,72 @@ app.get('/api/pinterest/search-with-ocr', async (req, res) => {
     while (meaningfulPins.length < count && attempts < maxAttempts && !noMorePages) {
       attempts++;
 
-      // Get a batch of pins each attempt
       const batchSize = Math.max(count * 3, 10);
       const searchResult = await searchPinterest(query, batchSize, bookmark);
       const pins = searchResult.pins;
 
-      if (!pins || pins.length === 0) {
-        console.log(`Attempt ${attempts}: no pins found, ending.`);
-        break;
-      }
+      if (!pins || pins.length === 0) break;
 
-      // Save bookmark for next iteration
       if (searchResult.bookmark) {
         bookmark = searchResult.bookmark;
       } else {
         noMorePages = true;
-        console.log(`Attempt ${attempts}: no more pages after this batch.`);
       }
 
-      console.log(`Attempt ${attempts}: checking ${pins.length} pins with OCR...`);
+      console.log(`Attempt ${attempts}: checking ${pins.length} pins...`);
 
       for (const pin of pins) {
         if (meaningfulPins.length >= count) break;
         if (!pin.image) continue;
 
-        // Use the ORIGINAL image for OCR — never resize, Lens needs full quality
-        const ocrImageUrl = pin.image;
         let displayImageUrl = pin.image;
-
-        // Only resize for the display image, NOT for OCR
         if (size === 'small') displayImageUrl = displayImageUrl.replace(/\/\d+x\//, '/236x/');
         else if (size === 'medium') displayImageUrl = displayImageUrl.replace(/\/\d+x\//, '/564x/');
 
-        // Try Google Lens OCR on the FULL quality image
-        const ocrResult = await extractTextWithLens(ocrImageUrl);
-        let extractedText = (ocrResult.text || '').trim();
+        // Try to extract text — first from Pinterest pin page, then from description
+        let extractedText = '';
 
-        // Pinterest description often has the FULL Arabic text for quote pins
-        const pinterestText = (pin.description || pin.title || '').trim();
-
-        // Prefer Pinterest description when Lens gives short or empty text
-        if ((!extractedText || extractedText.length < 10) && pinterestText.length > extractedText.length) {
-          extractedText = pinterestText;
+        // Method A: Open the pin page and extract text (most reliable for Arabic quotes)
+        if (pin.link) {
+          extractedText = await extractTextFromPinPage(pin.link);
         }
 
-        // Also use Pinterest description if it has more content
-        if (extractedText.length < 50 && pinterestText.length > 30) {
-          extractedText = pinterestText;
-        }
-
-        // Check if text has real content
+        // Method B: If pin page extraction gave nothing, use Pinterest description
         if (!extractedText || extractedText.length < 10) {
-          console.log(`  ⏭️  Pin ${pin.id}: no real text`);
+          extractedText = (pin.description || pin.title || '').trim();
+          if (extractedText) {
+            console.log(`  📝 Pin ${pin.id}: using Pinterest description — "${extractedText.substring(0, 80)}"`);
+          }
+        }
+
+        // Skip if no text found
+        if (!extractedText || extractedText.length < 5) {
+          console.log(`  ⏭️  Pin ${pin.id}: no text at all`);
           continue;
         }
 
+        // Check if text has real content
         const hasRealLetters = /[a-zA-Z؀-ۿ]/.test(extractedText);
         if (!hasRealLetters) {
           console.log(`  ⏭️  Pin ${pin.id}: no real letters`);
           continue;
         }
 
-        console.log(`  ✅ Pin ${pin.id}: "${extractedText.substring(0, 100)}..."`);
+        const detectedLang = containsArabic(extractedText) ? 'arabic' : 'english';
+        console.log(`  ✅ Pin ${pin.id}: ${detectedLang} — "${extractedText.substring(0, 100)}..."`);
+
         meaningfulPins.push({
           ...pin,
           image: displayImageUrl,
           extractedText,
-          language: ocrResult.language || 'unknown',
+          language: detectedLang,
           langMatch: true,
           lenstext_full: extractedText,
         });
       }
     }
 
-    console.log(`Search complete: found ${meaningfulPins.length}/${count} meaningful pins after ${attempts} attempts`);
-
+    console.log(`Search complete: ${meaningfulPins.length}/${count} pins after ${attempts} attempts`);
     res.json({
       success: true,
       query,
@@ -581,15 +594,15 @@ app.get('/api/pinterest/search-with-ocr', async (req, res) => {
 
 app.get('/', (req, res) => {
   res.json({
-    status: 'alive', name: 'Pinterest API', version: '1.1.0', loggedIn,
+    status: 'alive', name: 'Pinterest API', version: '1.2.0', loggedIn,
     note: 'Set PINTEREST_EMAIL & PINTEREST_PASSWORD in env for search',
     endpoints: {
       search: 'GET /api/pinterest/search?q=YOUR_QUERY&count=10&size=medium',
       bookmark: 'Pass &bookmark=VALUE from previous response for next page',
       download: 'GET /api/pinterest/download?url=IMAGE_URL',
-      ocr: 'POST /api/pinterest/ocr { "url": "IMAGE_URL" }',
-      lens: 'POST /api/pinterest/lens { "url": "IMAGE_URL" } (Google Lens ONLY)',
-      searchWithOcr: 'GET /api/pinterest/search-with-ocr?q=YOUR_QUERY&count=10&size=medium (Smart search with language-aware OCR filtering)',
+      ocr: 'POST /api/pinterest/ocr { "url": "IMAGE_URL", "pinUrl": "PIN_PAGE_URL" }',
+      lens: 'POST /api/pinterest/lens { "url": "IMAGE_URL", "pinUrl": "PIN_PAGE_URL" }',
+      searchWithOcr: 'GET /api/pinterest/search-with-ocr?q=YOUR_QUERY&count=10&size=medium — full smart search with text extraction',
     },
   });
 });
@@ -609,19 +622,11 @@ app.listen(PORT, () => {
     });
   } else {
     console.log('⚠️  Pinterest credentials not configured.');
-    console.log('   Search needs these to return results.');
-    console.log('   Set in Render Dashboard → Environment:');
-    console.log('   PINTEREST_EMAIL  (your Pinterest login email)');
-    console.log('   PINTEREST_PASSWORD (your Pinterest password)\n');
+    console.log('   Set PINTEREST_EMAIL & PINTEREST_PASSWORD in Render Dashboard.');
   }
 });
 
 process.on('SIGTERM', () => process.exit(0));
 process.on('SIGINT', () => process.exit(0));
-
-process.on('uncaughtException', (err) => {
-  console.error('💥 Uncaught:', err.message?.substring(0, 100));
-});
-process.on('unhandledRejection', (err) => {
-  console.error('💥 Unhandled:', err.message?.substring(0, 100));
-});
+process.on('uncaughtException', (err) => console.error('💥 Uncaught:', err.message?.substring(0, 100)));
+process.on('unhandledRejection', (err) => console.error('💥 Unhandled:', err.message?.substring(0, 100)));
