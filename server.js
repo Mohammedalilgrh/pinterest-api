@@ -70,8 +70,76 @@ async function extractTextWithLens(imageUrl) {
   try {
     console.log(`🔍 Lens OCR: ${imageUrl.substring(0, 60)}...`);
     const result = await lens.scanByURL(imageUrl);
-    const text = result.segments.map(s => s.text).join(' ').trim();
-    console.log(`✅ Lens OCR: ${text.substring(0, 80)}... (lang: ${result.language || 'N/A'})`);
+
+    // Try multiple ways to get ALL text from Lens result
+    let text = '';
+
+    // Method 1: segments array (each has .text)
+    if (result.segments && Array.isArray(result.segments) && result.segments.length > 0) {
+      text = result.segments.map(s => s.text || '').filter(Boolean).join('\n');
+    }
+
+    // Method 2: fullText or rawText field (sometimes has everything in one string)
+    if (!text || text.length < 10) {
+      const fullText = result.fullText || result.rawText || result.text || '';
+      if (fullText.length > text.length) {
+        text = fullText;
+      }
+    }
+
+    // Method 3: concatenate ALL string fields in the result object
+    if (!text || text.length < 10) {
+      const allParts = [];
+      for (const key of Object.keys(result)) {
+        if (typeof result[key] === 'string' && result[key].length > 5) {
+          allParts.push(result[key]);
+        }
+        if (Array.isArray(result[key])) {
+          for (const item of result[key]) {
+            if (typeof item === 'string') allParts.push(item);
+            if (item && typeof item.text === 'string') allParts.push(item.text);
+            if (item && typeof item.content === 'string') allParts.push(item.content);
+            if (item && typeof item.value === 'string') allParts.push(item.value);
+          }
+        }
+      }
+      if (allParts.length > 0) {
+        const combined = allParts.join('\n');
+        if (combined.length > text.length) {
+          text = combined;
+        }
+      }
+    }
+
+    // Method 4: raw response object — dump anything that looks like text
+    if (!text || text.length < 10) {
+      try {
+        const raw = JSON.stringify(result);
+        // Try to extract meaningful text content from serialized response
+        const lines = [];
+        const seen = new Set();
+        // Find all string values in the JSON
+        const matches = raw.match(/"text":"([^"]+)"/g);
+        if (matches) {
+          for (const m of matches) {
+            const v = JSON.parse(m.match(/(\{.*)/)?.[0] || m).text || m.match(/:(".*")$/)?.[1] || '';
+            const decoded = v.replace(/^"|"$/g, '');
+            if (decoded.length > 3 && !seen.has(decoded)) {
+              seen.add(decoded);
+              lines.push(decoded);
+            }
+          }
+        }
+        if (lines.length > 0) {
+          text = lines.join('\n');
+        }
+      } catch (e) {}
+    }
+
+    const firstLine = text.split('\n')[0] || '';
+    console.log(`✅ Lens OCR: extracted ${text.length} chars, first: "${firstLine.substring(0, 80)}..." (lang: ${result.language || 'N/A'})`);
+
+    // Return the FULL text — use newline as separator for multi-line quotes
     return { text, language: result.language };
   } catch (err) {
     console.error('❌ Lens OCR error:', err.message?.substring(0, 80));
