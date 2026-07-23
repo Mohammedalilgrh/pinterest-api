@@ -482,15 +482,16 @@ app.get('/api/pinterest/search-with-ocr', async (req, res) => {
     console.log(`🔍 Search+OCR: "${query}" (need: ${count}, lang: ${targetLang})`);
 
     let attempts = 0;
-    const maxAttempts = 5;
+    const maxAttempts = 30;
     let meaningfulPins = [];
     let bookmark = req.query.bookmark || null;
+    let noMorePages = false;
 
-    while (meaningfulPins.length < count && attempts < maxAttempts) {
+    while (meaningfulPins.length < count && attempts < maxAttempts && !noMorePages) {
       attempts++;
 
-      // Get a batch of pins each attempt — much faster than 1 at a time
-      const batchSize = Math.max(count * 2, 10);
+      // Get a batch of pins each attempt
+      const batchSize = Math.max(count * 3, 10);
       const searchResult = await searchPinterest(query, batchSize, bookmark);
       const pins = searchResult.pins;
 
@@ -503,7 +504,7 @@ app.get('/api/pinterest/search-with-ocr', async (req, res) => {
       if (searchResult.bookmark) {
         bookmark = searchResult.bookmark;
       } else {
-        // No more pages — stop after this batch
+        noMorePages = true;
         console.log(`Attempt ${attempts}: no more pages after this batch.`);
       }
 
@@ -514,7 +515,7 @@ app.get('/api/pinterest/search-with-ocr', async (req, res) => {
         if (!pin.image) continue;
 
         // Use the ORIGINAL image for OCR — never resize, Lens needs full quality
-        const ocrImageUrl = pin.image; // Original Pinterest image
+        const ocrImageUrl = pin.image;
         let displayImageUrl = pin.image;
 
         // Only resize for the display image, NOT for OCR
@@ -526,51 +527,43 @@ app.get('/api/pinterest/search-with-ocr', async (req, res) => {
         let extractedText = (ocrResult.text || '').trim();
 
         // Pinterest description often has the FULL Arabic text for quote pins
-        // Prefer Pinterest description when Lens gives short or empty text
         const pinterestText = (pin.description || pin.title || '').trim();
 
-        // If Lens returns nothing or very short text, use Pinterest description
+        // Prefer Pinterest description when Lens gives short or empty text
         if ((!extractedText || extractedText.length < 10) && pinterestText.length > extractedText.length) {
           extractedText = pinterestText;
-          console.log(`  📝 Pin ${pin.id}: using Pinterest text (Lens too short) — "${extractedText.substring(0, 100)}"`);
         }
 
-        // If Lens text is decent, also append Pinterest description if it's longer
+        // Also use Pinterest description if it has more content
         if (extractedText.length < 50 && pinterestText.length > 30) {
           extractedText = pinterestText;
-          console.log(`  📝 Pin ${pin.id}: using Pinterest text (short Lens) — "${extractedText.substring(0, 100)}"`);
         }
 
-        if (!extractedText || extractedText.length < 3) {
-          console.log(`  ⏭️  Pin ${pin.id}: no text at all`);
+        // Check if text has real content
+        if (!extractedText || extractedText.length < 10) {
+          console.log(`  ⏭️  Pin ${pin.id}: no real text`);
           continue;
         }
 
-        // Accept any text that has real letters (Arabic or English)
         const hasRealLetters = /[a-zA-Z؀-ۿ]/.test(extractedText);
-        const wordCount = extractedText.split(/\s+/).filter(Boolean).length;
-
-        if (hasRealLetters && wordCount >= 2) {
-          console.log(`  ✅ Pin ${pin.id}: "${extractedText.substring(0, 100)}..."`);
-          meaningfulPins.push({
-            ...pin,
-            image: displayImageUrl,
-            extractedText,
-            language: ocrResult.language || 'unknown',
-            langMatch: true,
-            lenstext_full: extractedText,
-          });
-        } else {
-          console.log(`  ❌ Pin ${pin.id}: no real text — "${extractedText.substring(0, 60)}..."`);
+        if (!hasRealLetters) {
+          console.log(`  ⏭️  Pin ${pin.id}: no real letters`);
+          continue;
         }
-      }
 
-      // If no bookmark and still need more pins, stop
-      if (!searchResult.bookmark) {
-        console.log(`No bookmark — searched all available pages.`);
-        break;
+        console.log(`  ✅ Pin ${pin.id}: "${extractedText.substring(0, 100)}..."`);
+        meaningfulPins.push({
+          ...pin,
+          image: displayImageUrl,
+          extractedText,
+          language: ocrResult.language || 'unknown',
+          langMatch: true,
+          lenstext_full: extractedText,
+        });
       }
     }
+
+    console.log(`Search complete: found ${meaningfulPins.length}/${count} meaningful pins after ${attempts} attempts`);
 
     res.json({
       success: true,
