@@ -380,6 +380,7 @@ function lensText(rawText) {
                 }
 
                 const words = sentence.split(/\s+/).filter(word => word.length > 0);
+                // Revert to stricter minimum length check
                 if (words.length < 4) { // Minimum Length Check (e.g., 4 words)
                     currentSentence = [];
                     continue;
@@ -388,11 +389,11 @@ function lensText(rawText) {
                 const alphanumericCount = (sentence.match(/[a-zA-Z0-9]/g) || []).length;
                 const totalCount = sentence.length;
 
-                if (totalCount > 10 && (alphanumericCount / totalCount < 0.5)) { // Less than 50% alphanumeric for longer sentences
+                if (totalCount > 10 && (alphanumericCount / totalCount < 0.7)) { // Less than 70% alphanumeric for longer sentences
                     currentSentence = [];
                     continue;
                 }
-                if (totalCount <= 10 && totalCount > 0 && (alphanumericCount / totalCount < 0.7)) { // Less than 70% alphanumeric for shorter sentences
+                if (totalCount <= 10 && totalCount > 0 && (alphanumericCount / totalCount < 0.85)) { // Less than 85% alphanumeric for shorter sentences
                     currentSentence = [];
                     continue;
                 }
@@ -403,13 +404,6 @@ function lensText(rawText) {
                     continue;
                 }
 
-                // Punctuation Check - If it doesn't end with strong punctuation, it might be a fragment.
-                if (!/[.!?]$/.test(sentence)) {
-                    if (words.length < 6 && totalCount < 30) { // If short/medium and no end punctuation, filter out more strictly
-                        currentSentence = [];
-                        continue;
-                    }
-                }
 
                 qualifyingSentences.push(sentence);
             }
@@ -426,13 +420,14 @@ function lensText(rawText) {
                 // do nothing
             } else {
                 const words = sentence.split(/\s+/).filter(word => word.length > 0);
+                // Revert to stricter minimum length check
                 if (words.length >= 4) { // Minimum Length Check
                     const alphanumericCount = (sentence.match(/[a-zA-Z0-9]/g) || []).length;
                     const totalCount = sentence.length;
 
-                    if (totalCount > 10 && (alphanumericCount / totalCount < 0.5)) {
+                    if (totalCount > 10 && (alphanumericCount / totalCount < 0.7)) {
                         // do nothing
-                    } else if (totalCount <= 10 && totalCount > 0 && (alphanumericCount / totalCount < 0.7)) {
+                    } else if (totalCount <= 10 && totalCount > 0 && (alphanumericCount / totalCount < 0.85)) {
                         // do nothing
                     } else {
                         const errorKeywords = ['Error:', 'Traceback', 'def ', 'import ', 'function ', 'class ', 'SyntaxError', 'TypeError', 'HTTP ERROR', 'Failed'];
@@ -623,3 +618,5 @@ process.on('uncaughtException', (err) => {
 process.on('unhandledRejection', (err) => {
   console.error('💥 Unhandled:', err.message?.substring(0, 100));
 });
+
+module.exports = { lensText }; // Export lensText for testing and potential external use
