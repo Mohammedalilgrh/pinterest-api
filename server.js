@@ -401,10 +401,11 @@ app.get('/api/pinterest/search-with-ocr', async (req, res) => {
     let attempts = 0;
     const maxAttempts = 10;
     let meaningfulPins = [];
+    let bookmark = req.query.bookmark || null;
 
     while (meaningfulPins.length < count && attempts < maxAttempts) {
       attempts++;
-      const searchResult = await searchPinterest(query, 1, null);
+      const searchResult = await searchPinterest(query, 1, bookmark);
       const pins = searchResult.pins;
 
       if (pins.length === 0) {
