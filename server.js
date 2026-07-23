@@ -253,7 +253,7 @@ async function searchPinterest(query, limit = 10, bookmark = null) {
               attemptPins.push({
                 id: pin.id || '',
                 title: pin.title || pin.grid_title || '',
-                description: pin.description || pin.pin_description || '',
+                description: pin.description || pin.pin_description || pin.rich_summary?.display_description || '',
                 image,
                 link: pin.link || `https://www.pinterest.com/pin/${pin.id}/`,
               });
@@ -445,18 +445,32 @@ app.get('/api/pinterest/search-with-ocr', async (req, res) => {
         if (meaningfulPins.length >= count) break;
         if (!pin.image) continue;
 
-        let imgUrl = pin.image;
-        if (size === 'small') imgUrl = imgUrl.replace(/\/\d+x\//, '/236x/');
-        else if (size === 'medium') imgUrl = imgUrl.replace(/\/\d+x\//, '/564x/');
+        // Use the ORIGINAL image for OCR — never resize, Lens needs full quality
+        const ocrImageUrl = pin.image; // Original Pinterest image
+        let displayImageUrl = pin.image;
 
-        // Try Google Lens OCR first
-        const ocrResult = await extractTextWithLens(imgUrl);
+        // Only resize for the display image, NOT for OCR
+        if (size === 'small') displayImageUrl = displayImageUrl.replace(/\/\d+x\//, '/236x/');
+        else if (size === 'medium') displayImageUrl = displayImageUrl.replace(/\/\d+x\//, '/564x/');
+
+        // Try Google Lens OCR on the FULL quality image
+        const ocrResult = await extractTextWithLens(ocrImageUrl);
         let extractedText = (ocrResult.text || '').trim();
 
-        // If Lens gives us nothing useful, fall back to Pinterest's own title/description
-        if (!extractedText || extractedText.length < 5) {
-          extractedText = pin.title || pin.description || '';
-          console.log(`  📝 Pin ${pin.id}: using Pinterest text: "${extractedText.substring(0, 40)}..."`);
+        // Pinterest description often has the FULL Arabic text for quote pins
+        // Prefer Pinterest description when Lens gives short or empty text
+        const pinterestText = (pin.description || pin.title || '').trim();
+
+        // If Lens returns nothing or very short text, use Pinterest description
+        if ((!extractedText || extractedText.length < 10) && pinterestText.length > extractedText.length) {
+          extractedText = pinterestText;
+          console.log(`  📝 Pin ${pin.id}: using Pinterest text (Lens too short) — "${extractedText.substring(0, 100)}"`);
+        }
+
+        // If Lens text is decent, also append Pinterest description if it's longer
+        if (extractedText.length < 50 && pinterestText.length > 30) {
+          extractedText = pinterestText;
+          console.log(`  📝 Pin ${pin.id}: using Pinterest text (short Lens) — "${extractedText.substring(0, 100)}"`);
         }
 
         if (!extractedText || extractedText.length < 3) {
@@ -469,17 +483,17 @@ app.get('/api/pinterest/search-with-ocr', async (req, res) => {
         const wordCount = extractedText.split(/\s+/).filter(Boolean).length;
 
         if (hasRealLetters && wordCount >= 2) {
-          console.log(`  ✅ Pin ${pin.id}: "${extractedText.substring(0, 60)}..."`);
+          console.log(`  ✅ Pin ${pin.id}: "${extractedText.substring(0, 100)}..."`);
           meaningfulPins.push({
             ...pin,
-            image: imgUrl,
+            image: displayImageUrl,
             extractedText,
             language: ocrResult.language || 'unknown',
             langMatch: true,
             lenstext_full: extractedText,
           });
         } else {
-          console.log(`  ❌ Pin ${pin.id}: no real text — "${extractedText.substring(0, 40)}..."`);
+          console.log(`  ❌ Pin ${pin.id}: no real text — "${extractedText.substring(0, 60)}..."`);
         }
       }
 
