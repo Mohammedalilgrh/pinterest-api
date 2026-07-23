@@ -7,6 +7,7 @@ import fs from 'fs';
 import path from 'path';
 import https from 'https';
 import { fileURLToPath } from 'url';
+import Lens from 'chrome-lens-ocr';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -25,6 +26,12 @@ app.use(cors());
 app.use(express.json({ limit: '5mb' }));
 
 let loggedIn = false;
+
+// Initialize Lens (chrome-lens-ocr v4.1.1 — working version)
+const lens = new Lens({
+  chromeVersion: '124.0.6367.60',
+  userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+});
 
 function containsArabic(text) {
   return /[؀-ۿ]/.test(text);
@@ -48,159 +55,27 @@ function checkIfMeaningful(text, targetLang = null) {
 }
 
 // ──────────────────────────────────────────────
-// OCR: Extract text from Pinterest pin page
-// This is MUCH more reliable than chrome-lens-ocr
+// OCR: Extract text from image using Google Lens (chrome-lens-ocr v4.1.1)
 // ──────────────────────────────────────────────
 
-async function extractTextFromPinPage(pinUrl) {
-  let browser;
+async function extractTextWithLens(imageUrl) {
   try {
-    browser = await chromium.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
-      timeout: 20000,
-    });
-    const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-    });
+    console.log(`🔍 Lens OCR: ${imageUrl.substring(0, 60)}...`);
+    const result = await lens.scanByURL(imageUrl);
 
-    // Load saved cookies if available
-    if (fs.existsSync(STATE_FILE)) {
-      try {
-        const cookies = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-        await context.addCookies(cookies);
-      } catch (e) {}
-    }
+    // Extract ALL text segments — each segment is text found in the image
+    const text = result.segments.map(s => s.text).join('\n').trim();
+    const language = result.language || 'unknown';
 
-    const page = await context.newPage();
-    console.log(`  📄 Opening pin page: ${pinUrl.substring(0, 60)}...`);
-    await page.goto(pinUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
-    await page.waitForTimeout(3000);
-
-    let text = '';
-
-    // Method 1: Get page title (Pinterest often puts text in <title>)
-    text = await page.title();
-
-    // Method 2: Extract meta description (og:description, twitter:description)
-    if (!text || text.length < 10) {
-      text = await page.evaluate(() => {
-        const meta = document.querySelector('meta[property="og:description"]') ||
-                     document.querySelector('meta[name="description"]') ||
-                     document.querySelector('meta[property="twitter:description"]');
-        return meta ? meta.content : '';
-      });
-    }
-
-    // Method 3: Extract from Pinterest's rich pin data (the text content area)
-    if (!text || text.length < 10) {
-      // Try various selectors Pinterest uses for pin text content
-      text = await page.evaluate(() => {
-        // Try common Pinterest selectors for the pin text/description
-        const selectors = [
-          '[data-test-id="richPinInformation"]',
-          '[data-test-id="pinDescription"]',
-          '[data-test-id="pinsDescriptionId"]',
-          'div[class*="PinDescription"]',
-          'div[class*="pinDescription"]',
-          'span[class*="description"]',
-          // Try any large text blocks on the page
-          'div[class*="text"] span',
-          'article p',
-        ];
-        for (const sel of selectors) {
-          const el = document.querySelector(sel);
-          if (el && el.textContent.trim().length > 10) {
-            return el.textContent.trim();
-          }
-        }
-        return '';
-      });
-    }
-
-    // Method 4: Try extracting alt text from the main pin image
-    if (!text || text.length < 10) {
-      text = await page.evaluate(() => {
-        const imgs = document.querySelectorAll('img');
-        for (const img of imgs) {
-          if (img.alt && img.alt.length > 20) return img.alt;
-        }
-        return '';
-      });
-    }
-
-    // Method 5: Extract structured data / JSON-LD from the page
-    if (!text || text.length < 10) {
-      text = await page.evaluate(() => {
-        const scripts = document.querySelectorAll('script[type="application/ld+json"]');
-        for (const script of scripts) {
-          try {
-            const data = JSON.parse(script.textContent);
-            const desc = data?.description || data?.caption || data?.text || '';
-            if (desc.length > 10) return desc;
-          } catch (e) {}
-        }
-        return '';
-      });
-    }
-
-    // Method 6: Get the alt text from the image on the pin page
-    if (!text || text.length < 10) {
-      text = await page.evaluate(() => {
-        const img = document.querySelector('div[data-test-id="closeup-image"] img');
-        return img ? img.alt || '' : '';
-      });
-    }
-
-    await context.close();
-    await browser.close();
-
-    // Clean up the text — remove Pinterest suffixes like " — Pinterest"
     if (text) {
-      text = text.replace(/ - Pinterest$/, '').replace(/ — Pinterest$/, '').trim();
+      console.log(`✅ Lens OCR: ${text.length} chars — "${text.substring(0, 100)}..." (${language})`);
+    } else {
+      console.log(`⚠️  Lens OCR returned empty`);
     }
 
-    console.log(`  📄 Pin page text: "${(text || '[empty]').substring(0, 100)}" (${text ? text.length : 0} chars)`);
-    return text || '';
+    return { text, language };
   } catch (err) {
-    console.log(`  ⚠️  Pin page extraction failed: ${err.message?.substring(0, 50)}`);
-    if (browser) await browser.close().catch(() => {});
-    return '';
-  }
-}
-
-async function extractTextFromImageDirect(imageUrl) {
-  // Try to get alt text and context from the image URL directly
-  // Pinterest image URLs don't have text in them, so this is just a placeholder
-  return '';
-}
-
-async function extractTextWithLens(imageUrl, pinUrl) {
-  try {
-    console.log(`🔍 OCR: ${imageUrl.substring(0, 60)}...`);
-
-    let text = '';
-
-    // Strategy 1: If we have a pin URL, extract text from the Pinterest pin page
-    // This is the most reliable method for Pinterest quote pins
-    if (pinUrl) {
-      text = await extractTextFromPinPage(pinUrl);
-    }
-
-    // Strategy 2: Use Pinterest description from our search results
-    // (We already have this from pin.description — passed separately)
-
-    if (text && text.length > 5) {
-      console.log(`✅ OCR: ${text.length} chars — "${text.substring(0, 80)}..."`);
-      // Check if it has Arabic
-      const lang = containsArabic(text) ? 'arabic' : containsEnglish(text) ? 'english' : 'unknown';
-      return { text, language: lang };
-    }
-
-    console.log(`⚠️  OCR returned empty for this image`);
-    return { text: '', language: 'unknown' };
-  } catch (err) {
-    console.error('❌ OCR error:', err.message?.substring(0, 80));
+    console.error('❌ Lens OCR error:', err.message?.substring(0, 80));
     return { text: '', language: '', error: err.message };
   }
 }
@@ -534,19 +409,27 @@ app.get('/api/pinterest/search-with-ocr', async (req, res) => {
         if (size === 'small') displayImageUrl = displayImageUrl.replace(/\/\d+x\//, '/236x/');
         else if (size === 'medium') displayImageUrl = displayImageUrl.replace(/\/\d+x\//, '/564x/');
 
-        // Try to extract text — first from Pinterest pin page, then from description
-        let extractedText = '';
+        // Step 1: Use Google Lens directly on the image to extract ALL text
+        // This reads the actual text in the image (Arabic, English, everything)
+        console.log(`  🔍 Lens scanning pin ${pin.id}...`);
+        const lensResult = await extractTextWithLens(pin.image);
+        let extractedText = lensResult.text;
 
-        // Method A: Open the pin page and extract text (most reliable for Arabic quotes)
-        if (pin.link) {
-          extractedText = await extractTextFromPinPage(pin.link);
+        // Step 2: If Lens gave us something, also append Pinterest description
+        // for extra context (but Lens text is the primary source)
+        if (extractedText && extractedText.length > 10) {
+          const pinterestDesc = (pin.description || pin.title || '').trim();
+          if (pinterestDesc && pinterestDesc.length > 10 && !extractedText.includes(pinterestDesc)) {
+            extractedText = extractedText + '\n\n' + pinterestDesc;
+            console.log(`  📝 Pin ${pin.id}: appended Pinterest description`);
+          }
         }
 
-        // Method B: If pin page extraction gave nothing, use Pinterest description
-        if (!extractedText || extractedText.length < 10) {
+        // Step 3: If Lens failed, fall back to Pinterest description
+        if (!extractedText || extractedText.length < 5) {
           extractedText = (pin.description || pin.title || '').trim();
           if (extractedText) {
-            console.log(`  📝 Pin ${pin.id}: using Pinterest description — "${extractedText.substring(0, 80)}"`);
+            console.log(`  📝 Pin ${pin.id}: using Pinterest description (Lens failed) — "${extractedText.substring(0, 80)}"`);
           }
         }
 
@@ -556,13 +439,14 @@ app.get('/api/pinterest/search-with-ocr', async (req, res) => {
           continue;
         }
 
-        // Check if text has real content
+        // Check if text has real content (Arabic or English letters)
         const hasRealLetters = /[a-zA-Z؀-ۿ]/.test(extractedText);
         if (!hasRealLetters) {
           console.log(`  ⏭️  Pin ${pin.id}: no real letters`);
           continue;
         }
 
+        // Detect language
         const detectedLang = containsArabic(extractedText) ? 'arabic' : 'english';
         console.log(`  ✅ Pin ${pin.id}: ${detectedLang} — "${extractedText.substring(0, 100)}..."`);
 
@@ -570,7 +454,7 @@ app.get('/api/pinterest/search-with-ocr', async (req, res) => {
           ...pin,
           image: displayImageUrl,
           extractedText,
-          language: detectedLang,
+          language: lensResult.language || detectedLang,
           langMatch: true,
           lenstext_full: extractedText,
         });
