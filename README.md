@@ -357,6 +357,20 @@ Returns server status, login state, and all available endpoints.
 | 🔍+🔎 **Life lessons** | `GET` | `https://pinterest-api.onrender.com/api/pinterest/search-with-ocr?q=life+lessons&count=5&size=large` |
 | 🔍+🔎 **Inspirational** | `GET` | `https://pinterest-api.onrender.com/api/pinterest/search-with-ocr?q=inspirational+quotes&count=5&size=large` |
 
+### 🇸🇦 Arabic — روابط جاهزة للنسخ واللصق
+
+| وش تبي | الرابط كامل |
+|---|---|
+| 🔍 **بحث إنجليزي** | `GET /api/pinterest/search?q=love+quotes&count=10` |
+| 🔍 **بحث عربي** | `GET /api/pinterest/search?q=أقوال+مأثورة&count=10` |
+| 🔍+🔎 **بحث ذكي إنجليزي** | `GET /api/pinterest/search-with-ocr?q=life+lessons&count=5` |
+| 🔍+🔎 **بحث ذكي عربي** | `GET /api/pinterest/search-with-ocr?q=حكم+وعبر&count=5` |
+| 🖼️ **تحميل صورة** | `GET /api/pinterest/download?url=IMAGE_URL` |
+| 🔎 **استخراج نص** | `POST /api/pinterest/lens` Body: `{"url":"IMAGE_URL"}` |
+| 💚 **فحص السيرفر** | `GET /` |
+
+> ⚠️ **ملاحظة:** استبدل `pinterest-api.onrender.com` باسم السيرفر حقك بعد ما تنشره.
+
 ### 🇸🇦 Arabic — Copy & Paste URLs
 
 | Purpose | Method | Full URL |
