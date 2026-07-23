@@ -48,16 +48,21 @@ function detectQueryLanguage(query) {
 }
 
 function checkIfMeaningful(text, targetLang = null) {
-  const minWords = 5;
-  const minChars = 20;
+  if (!text || text.trim().length < 3) return false;
+
   const hasLetters = /[a-zA-Z؀-ۿ]/.test(text);
-  const isMostlyAlphaNumeric = (text.replace(/[^a-zA-Z0-9؀-ۿ\s]/g, '').length / text.length) > 0.7;
   const wordCount = text.split(/\s+/).filter(Boolean).length;
 
-  if (!(text.length >= minChars && wordCount >= minWords && hasLetters && isMostlyAlphaNumeric)) return false;
+  // Very lenient — accept 2+ words with any real letters
+  if (!(wordCount >= 2 && hasLetters)) return false;
 
-  if (targetLang === 'arabic') return containsArabic(text);
-  if (targetLang === 'english') return containsEnglish(text);
+  if (targetLang === 'arabic') {
+    // Accept Arabic OR English — we just want real text
+    return /[؀-ۿ]/.test(text) || /[a-zA-Z]/.test(text);
+  }
+  if (targetLang === 'english') {
+    return /[a-zA-Z]/.test(text);
+  }
   return true;
 }
 
@@ -145,6 +150,15 @@ async function loginToPinterest() {
 // Pinterest Search
 // ──────────────────────────────────────────────
 
+// Arabic search terms to append for better Arabic results
+const ARABIC_TERMS = [
+  'اقتباس','حكمة','مقولة','كلام','خواطر','عبارات','شعر','أدب','مواعظ',
+  'نصيحة','تأمل','إلهام','تحفيز','نجاح','حياة','قوة','أمل','حب',
+  'صباح','مساء','دينية','إسلامية','قرآن','ذكر','دعاء','عبادات',
+  'فلسفة','منطق','علم','معرفة','فكر','عقل','روح','سلام','تفاؤل',
+  'image','quote','text','calligraphy','arabic','islamic',
+];
+
 const RELATED_TERMS = [
   'aesthetic','art','beautiful','best','bold','bright','calm','chill','classic',
   'cool','creative','cute','daily','deep','dream','epic','famous','fantastic',
@@ -168,10 +182,11 @@ let lastPickedIndex = -1;
 function buildFreshQuery(query) {
   const targetLang = detectQueryLanguage(query);
 
-  // For Arabic queries — skip English filler words, use counter only
+  // For Arabic queries — append Arabic search terms that help Pinterest return text-heavy results
   if (targetLang === 'arabic') {
+    const word = ARABIC_TERMS[Math.floor(Math.random() * ARABIC_TERMS.length)];
     searchCounter++;
-    return `${query} ${searchCounter}`;
+    return `${query} ${word}`;
   }
 
   // For English queries — keep freshness words
@@ -434,26 +449,37 @@ app.get('/api/pinterest/search-with-ocr', async (req, res) => {
         if (size === 'small') imgUrl = imgUrl.replace(/\/\d+x\//, '/236x/');
         else if (size === 'medium') imgUrl = imgUrl.replace(/\/\d+x\//, '/564x/');
 
+        // Try Google Lens OCR first
         const ocrResult = await extractTextWithLens(imgUrl);
-        const extractedText = (ocrResult.text || '').trim();
+        let extractedText = (ocrResult.text || '').trim();
 
-        if (!extractedText) {
-          console.log(`  ⏭️  Pin ${pin.id}: empty OCR`);
+        // If Lens gives us nothing useful, fall back to Pinterest's own title/description
+        if (!extractedText || extractedText.length < 5) {
+          extractedText = pin.title || pin.description || '';
+          console.log(`  📝 Pin ${pin.id}: using Pinterest text: "${extractedText.substring(0, 40)}..."`);
+        }
+
+        if (!extractedText || extractedText.length < 3) {
+          console.log(`  ⏭️  Pin ${pin.id}: no text at all`);
           continue;
         }
 
-        if (checkIfMeaningful(extractedText, targetLang)) {
-          console.log(`  ✅ Pin ${pin.id}: ${extractedText.substring(0, 60)}...`);
+        // Accept any text that has real letters (Arabic or English)
+        const hasRealLetters = /[a-zA-Z؀-ۿ]/.test(extractedText);
+        const wordCount = extractedText.split(/\s+/).filter(Boolean).length;
+
+        if (hasRealLetters && wordCount >= 2) {
+          console.log(`  ✅ Pin ${pin.id}: "${extractedText.substring(0, 60)}..."`);
           meaningfulPins.push({
             ...pin,
             image: imgUrl,
             extractedText,
-            language: ocrResult.language,
+            language: ocrResult.language || 'unknown',
             langMatch: true,
             lenstext_full: extractedText,
           });
         } else {
-          console.log(`  ❌ Pin ${pin.id}: wrong/no text — "${extractedText.substring(0, 40)}..."`);
+          console.log(`  ❌ Pin ${pin.id}: no real text — "${extractedText.substring(0, 40)}..."`);
         }
       }
 
