@@ -83,7 +83,7 @@ All endpoints return JSON responses.
 Extracts and lenses text from a given image URL.
 
 -   **Method:** `POST`
--   **URL:** `your-render-app-url/api/pinterest/lens` (or `http://localhost:3000/api/pinterest/lens` locally)
+-   **URL:** `https://your-render-app.onrender.com/api/pinterest/lens` (or `http://localhost:3000/api/pinterest/lens` locally)
 -   **Headers:** `Content-Type: application/json`
 -   **Body:**
     ```json
@@ -126,13 +126,13 @@ Extracts and lenses text from a given image URL.
 Performs a Pinterest search, then applies OCR and lensing to pin images, returning only those with qualifying lensed text. This is the recommended endpoint for n8n integration.
 
 -   **Method:** `GET`
--   **URL:** `your-render-app-url/api/pinterest/search-and-lens` (or `http://localhost:3000/api/pinterest/search-and-lens` locally)
+-   **URL:** `https://your-render-app.onrender.com/api/pinterest/search-and-lens` (or `http://localhost:3000/api/pinterest/search-and-lens` locally)
 -   **Query Parameters:**
     -   `query` (string, **required**): The search term for Pinterest (e.g., "healthy recipes").
     -   `count` (number, optional): The desired number of qualifying pins to return. Defaults to 5.
 
 -   **Example Request:**
-    `your-render-app-url/api/pinterest/search-and-lens?query=inspirational%20quotes&count=3`
+    `https://your-render-app.onrender.com/api/pinterest/search-and-lens?query=inspirational%20quotes&count=3`
 
 -   **Responses:**
     -   **Success (200 OK):**
