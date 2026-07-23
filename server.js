@@ -6,6 +6,8 @@ const { createWorker } = require('tesseract.js');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
+const axios = require('axios'); // For fetching image data as buffer
+const sharp = require('sharp'); // For image preprocessing
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -319,9 +321,21 @@ let ocrWorker = null;
 
 async function extractTextSimple(imageUrl) {
   try {
-    if (!ocrWorker) ocrWorker = await createWorker('eng');
+    if (!ocrWorker) ocrWorker = await createWorker('eng+ara');
     console.log(`🔍 OCR: ${imageUrl.substring(0, 60)}...`);
-    const { data } = await ocrWorker.recognize(imageUrl);
+
+    // 1. Fetch the image as a buffer
+    const response = await axios.get(imageUrl, { responseType: 'arraybuffer' });
+    const imageBuffer = Buffer.from(response.data);
+
+    // 2. Preprocess with Sharp
+    const processedImageBuffer = await sharp(imageBuffer)
+      .grayscale()
+      .normalize()
+      .toBuffer();
+
+    // 3. Recognize with Tesseract.js
+    const { data } = await ocrWorker.recognize(processedImageBuffer);
     const text = data.text?.trim() || '';
     console.log(`✅ OCR: ${text.substring(0, 80)}... (conf: ${Math.round(data.confidence || 0)})`);
     return { text, confidence: Math.round(data.confidence || 0) };
@@ -340,7 +354,25 @@ app.post('/api/pinterest/ocr', async (req, res) => {
   try {
     const imageUrl = req.body?.url;
     if (!imageUrl) return res.status(400).json({ success: false, error: 'Missing "url"' });
-    const result = await extractTextSimple(imageUrl);
+    const method = req.body?.method || 'tesseract'; // Default to tesseract
+
+    let result;
+    if (method === 'google_lens') {
+      result = await extractTextViaLens(imageUrl);
+    } else if (method === 'both') {
+      const tesseractResult = await extractTextSimple(imageUrl);
+      const lensResult = await extractTextViaLens(imageUrl);
+      return res.json({
+        success: tesseractResult.text || lensResult.text,
+        results: [
+          { text: tesseractResult.text, source: 'tesseract', confidence: tesseractResult.confidence },
+          { text: lensResult.text, source: 'google_lens' }
+        ]
+      });
+    } else {
+      result = await extractTextSimple(imageUrl);
+    }
+
     res.json({
       success: !!result.text,
       text: result.text,
