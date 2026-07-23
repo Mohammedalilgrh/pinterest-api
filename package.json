@@ -2,6 +2,7 @@
   "name": "pinterest-api",
   "version": "1.2.0",
   "description": "Pinterest Search API for n8n - search, download, and OCR pins",
+  "type": "module",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

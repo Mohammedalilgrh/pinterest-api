@@ -1,13 +1,16 @@
-const express = require('express');
-const { chromium } = require('playwright-extra');
-const stealth = require('puppeteer-extra-plugin-stealth')();
-chromium.use(stealth);
+import express from 'express';
+import { chromium } from 'playwright-extra';
+import stealthPlugin from 'puppeteer-extra-plugin-stealth';
 import Lens from 'chrome-lens-ocr';
 import dotenv from 'dotenv';
-const cors = require('cors');
-const fs = require('fs');
-const path = require('path');
-const axios = require('axios'); // For fetching image data as buffer
+import cors from 'cors';
+import fs from 'fs';
+import path from 'path';
+import https from 'https';
+import axios from 'axios';
+import { fileURLToPath } from 'url';
+
+chromium.use(stealthPlugin());
 
 dotenv.config();
 
@@ -15,6 +18,10 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const PINTEREST_EMAIL = process.env.PINTEREST_EMAIL || '';
 const PINTEREST_PASSWORD = process.env.PINTEREST_PASSWORD || '';
+
+// __dirname equivalent for ES modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 const STATE_FILE = path.join(__dirname, 'pinterest_auth.json');
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
@@ -359,7 +366,6 @@ app.get('/api/pinterest/download', async (req, res) => {
     const imageUrl = req.query.url;
     if (!imageUrl) return res.status(400).json({ success: false, error: 'Missing ?url=' });
 
-    const https = require('https');
     https.get(imageUrl, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
