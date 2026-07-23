@@ -490,6 +490,79 @@ app.post('/api/pinterest/ocr', async (req, res) => {
 
 // ⭐ Lens endpoint
 app.post('/api/pinterest/lens', async (req, res) => {
+
+app.get('/api/pinterest/search-and-lens', async (req, res) => {
+  try {
+    const query = req.query.q || req.query.query || req.query.search;
+    if (!query) {
+      return res.status(400).json({ success: false, error: 'Missing ?q parameter' });
+    }
+
+    const requestedCount = parseInt(req.query.count || req.query.limit || '10', 10);
+    const imageSize = req.query.size || 'medium';
+    let currentPage = parseInt(req.query.page || '1', 10); // Start page for Pinterest search
+    let bookmark = req.query.bookmark || null;
+
+    const finalLensedPins = [];
+    const MAX_PINTEREST_PAGES_TO_SEARCH = 5; // Limit to prevent infinite loops
+
+        for (let pageNum = 0; finalLensedPins.length < requestedCount && pageNum < MAX_PINTEREST_PAGES_TO_SEARCH; pageNum++) {
+      console.log(`🔍 Search & Lens: Page ${currentPage}, Pins needed: ${requestedCount - finalLensedPins.length}`);
+      const { pins, bookmark: newBookmark } = await searchPinterest(query, Math.max(requestedCount, 50), bookmark); // Fetch more pins to ensure enough qualifying ones
+      bookmark = newBookmark; // Update bookmark for next iteration
+
+      if (pins.length === 0) {
+        console.log('No more pins found on Pinterest.');
+        break; // No more pins to process
+      }
+
+      for (const pin of pins) {
+        if (finalLensedPins.length >= requestedCount) break;
+
+        let augmentedPin = { ...pin, lensedText: null, ocrError: null };
+
+        if (pin.image) {
+          const ocrResult = await extractTextViaLens(pin.image);
+          if (ocrResult.success && ocrResult.text) {
+            const lensedText = lensText(ocrResult.text);
+            if (lensedText) {
+              augmentedPin.lensedText = lensedText;
+              finalLensedPins.push(augmentedPin);
+            } else {
+              // Pin did not qualify after lensing
+              // console.log(`Skipped pin ${pin.id}: Text did not qualify after lensing.`);
+            }
+          } else {
+            augmentedPin.ocrError = ocrResult.error || 'No text extracted or OCR failed.';
+            // console.log(`Skipped pin ${pin.id}: OCR failed or no text. Error: ${augmentedPin.ocrError}`);
+          }
+        } else {
+          // console.log(`Skipped pin ${pin.id}: No image URL.`);
+        }
+      }
+
+      if (!bookmark) {
+        console.log('No more pages to search on Pinterest.');
+        break; // No more pages
+      }
+      currentPage++;
+    }
+
+
+    res.json({
+      success: true,
+      query,
+      count: finalLensedPins.length,
+      data: finalLensedPins,
+    });
+
+  } catch (err) {
+    console.error('Search and Lens endpoint error:', err.message);
+    res.status(500).json({ success: false, error: 'Search and Lens failed', details: err.message });
+  }
+});
+
+
   try {
     const imageUrl = req.body?.url;
     if (!imageUrl) return res.status(400).json({ success: false, error: 'Missing "url"' });
