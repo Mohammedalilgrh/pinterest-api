@@ -344,6 +344,140 @@ Returns server status, login state, and all available endpoints.
 
 ---
 
+## ⚡ Quick Reference — All Full URLs & How to Use in n8n HTTP Request
+
+> Replace `https://pinterest-api.onrender.com` with your actual Render URL after deployment.
+
+### 🇺🇸 English — Copy & Paste URLs
+
+| Purpose | Method | Full URL |
+|---|---|---|
+| 🔍 **Search pins** | `GET` | `https://pinterest-api.onrender.com/api/pinterest/search?q=motivational+quotes&count=5&size=large` |
+| 🔍+🔎 **Search + OCR (smart)** | `GET` | `https://pinterest-api.onrender.com/api/pinterest/search-with-ocr?q=motivational+quotes&count=5&size=large` |
+| 🔍+🔎 **Life lessons** | `GET` | `https://pinterest-api.onrender.com/api/pinterest/search-with-ocr?q=life+lessons&count=5&size=large` |
+| 🔍+🔎 **Inspirational** | `GET` | `https://pinterest-api.onrender.com/api/pinterest/search-with-ocr?q=inspirational+quotes&count=5&size=large` |
+
+### 🇸🇦 Arabic — Copy & Paste URLs
+
+| Purpose | Method | Full URL |
+|---|---|---|
+| 🔍 **بحث** | `GET` | `https://pinterest-api.onrender.com/api/pinterest/search?q=اقتباسات+تحفيزية&count=5&size=large` |
+| 🔍+🔎 **بحث + Lens + عربي** | `GET` | `https://pinterest-api.onrender.com/api/pinterest/search-with-ocr?q=اقتباسات+تحفيزية&count=5&size=large` |
+| 🔍+🔎 **حكم وعبر** | `GET` | `https://pinterest-api.onrender.com/api/pinterest/search-with-ocr?q=حكم+وعبر&count=5&size=large` |
+| 🔍+🔎 **أقوال مأثورة** | `GET` | `https://pinterest-api.onrender.com/api/pinterest/search-with-ocr?q=أقوال+مأثورة&count=5&size=large` |
+
+### 🖼️ Download & OCR — Copy & Paste URLs
+
+| Purpose | Method | URL / Body |
+|---|---|---|
+| 🖼️ **Download image** | `GET` | `https://pinterest-api.onrender.com/api/pinterest/download?url=https://i.pinimg.com/564x/abc123/image.jpg` |
+| 🔎 **OCR (extract text)** | `POST` | `https://pinterest-api.onrender.com/api/pinterest/ocr` — Body: `{ "url": "https://i.pinimg.com/abc123/image.jpg" }` |
+| 🔎 **Lens (extract text)** | `POST` | `https://pinterest-api.onrender.com/api/pinterest/lens` — Body: `{ "url": "https://i.pinimg.com/abc123/image.jpg" }` |
+| 💚 **Health check** | `GET` | `https://pinterest-api.onrender.com/` |
+
+---
+
+### 🔧 How to Use in n8n HTTP Request Node
+
+#### Option A: Simple Search (no text extraction)
+
+**Node settings:**
+
+| Setting | Value |
+|---|---|
+| **Method** | `GET` |
+| **URL** | `https://pinterest-api.onrender.com/api/pinterest/search?q=اقتباسات+تحفيزية&count=5&size=large` |
+| **Response Format** | `JSON` |
+
+**Output you get:**
+- `{{ $json.data }}` → array of pins with `id`, `title`, `description`, `image`, `link`
+
+---
+
+#### Option B: 🔥 Search + OCR (Smart — returns only meaningful pins in correct language) ⭐
+
+**Node settings — English:**
+
+| Setting | Value |
+|---|---|
+| **Method** | `GET` |
+| **URL** | `https://pinterest-api.onrender.com/api/pinterest/search-with-ocr?q=motivational+quotes&count=5&size=large` |
+| **Response Format** | `JSON` |
+
+**Node settings — Arabic:**
+
+| Setting | Value |
+|---|---|
+| **Method** | `GET` |
+| **URL** | `https://pinterest-api.onrender.com/api/pinterest/search-with-ocr?q=اقتباسات+تحفيزية&count=5&size=large` |
+| **Response Format** | `JSON` |
+
+**Output you get per pin:**
+| n8n Expression | What it gives you |
+|---|---|
+| `{{ $json.data[0].extractedText }}` | النص المستخرج من الصورة (الاقتباس) |
+| `{{ $json.data[0].image }}` | رابط الصورة |
+| `{{ $json.data[0].link }}` | رابط pin على Pinterest |
+| `{{ $json.data[0].title }}` | عنوان pin |
+| `{{ $json.data[0].language }}` | اللغة (ar / en) |
+| `{{ $json.data[0].langMatch }}` | التأكيد (arabic / english) |
+
+---
+
+#### Option C: Download Image (save binary file)
+
+**Node settings:**
+
+| Setting | Value |
+|---|---|
+| **Method** | `GET` |
+| **URL** | `https://pinterest-api.onrender.com/api/pinterest/download?url={{ $json.image }}` |
+| **Response Format** | `File` |
+
+> Use this after getting `image` URL from search results.
+
+---
+
+#### Option D: OCR / Lens — Extract Text from Any Image
+
+**Node settings:**
+
+| Setting | Value |
+|---|---|
+| **Method** | `POST` |
+| **URL** | `https://pinterest-api.onrender.com/api/pinterest/lens` |
+| **Headers** | `Content-Type: application/json` |
+| **Body** | `{ "url": "{{ $json.image }}" }` |
+| **Response Format** | `JSON` |
+
+**Output:** `{{ $json.text }}` contains the extracted text.
+
+---
+
+### ⭐ Full n8n Workflow: Search Arabic → Split → Download → Telegram
+
+```
+1. [HTTP Request] ← Search with OCR
+   Method: GET
+   URL: https://pinterest-api.onrender.com/api/pinterest/search-with-ocr?q=اقتباسات+تحفيزية&count=3&size=large
+   Response: JSON
+
+2. [Item Lists → Split Out Items]
+   This splits each pin into its own item
+
+3. [Loop Over Items] ← For each pin
+
+4.    ├── [HTTP Request] ← Download the image
+   │   Method: GET
+   │   URL: https://pinterest-api.onrender.com/api/pinterest/download?url={{ $json.image }}
+   │   Response: File
+   │
+   └── [Telegram / Discord / Google Sheets]
+       Message: 📜 {{ $json.extractedText }}
+```
+
+---
+
 ## 🧠 How Language Detection Works
 
 The server automatically detects whether you're searching in **Arabic** or **English** and filters results accordingly.
