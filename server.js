@@ -30,14 +30,44 @@ const lens = new Lens({
   userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 });
 
-function checkIfMeaningful(text) {
+// Check if text contains Arabic script (Unicode block 0600-06FF)
+function containsArabic(text) {
+  return /[؀-ۿ]/.test(text);
+}
+
+// Check if text contains Latin/English letters
+function containsEnglish(text) {
+  return /[a-zA-Z]/.test(text);
+}
+
+// Detect query language: if query has Arabic chars → Arabic mode, else → English mode
+function detectQueryLanguage(query) {
+  return containsArabic(query) ? 'arabic' : 'english';
+}
+
+function checkIfMeaningful(text, targetLang = null) {
   const minWords = 5;
   const minChars = 20;
-  const hasLetters = /[a-zA-Z؀-ۿ]/.test(text); // Checks for English or Arabic letters
+  const hasLetters = /[a-zA-Z؀-ۿ]/.test(text);
   const isMostlyAlphaNumeric = (text.replace(/[^a-zA-Z0-9؀-ۿ\s]/g, '').length / text.length) > 0.7;
   const wordCount = text.split(/\s+/).filter(Boolean).length;
 
-  return text.length >= minChars && wordCount >= minWords && hasLetters && isMostlyAlphaNumeric;
+  // Base check: text must be long enough and have letters
+  if (!(text.length >= minChars && wordCount >= minWords && hasLetters && isMostlyAlphaNumeric)) {
+    return false;
+  }
+
+  // Language-specific check
+  if (targetLang === 'arabic') {
+    // Must contain Arabic script (English mixed in is OK)
+    return containsArabic(text);
+  }
+  if (targetLang === 'english') {
+    // Must contain English/Latin letters (Arabic mixed in is OK)
+    return containsEnglish(text);
+  }
+
+  return true; // No language filter
 }
 
 async function extractTextWithLens(imageUrl) {
@@ -149,6 +179,12 @@ function buildFreshQuery(query) {
   // NEVER let Pinterest see the same query twice.
   // We use the user's query as the niche, then append a real word that
   // Pinterest actually has results for - plus a rotating timestamp.
+
+  // If query is Arabic, don't append English words — just use a counter
+  if (containsArabic(query)) {
+    searchCounter++;
+    return `${query} ${searchCounter}`;
+  }
 
   // Pick a word different from the last one
   let idx;
@@ -391,8 +427,12 @@ app.get('/api/pinterest/search-with-ocr', async (req, res) => {
 
     console.log(`🔍 Searching with OCR: "${query}" (count: ${count})`);
 
+    // Detect query language — Arabic or English
+    const targetLang = detectQueryLanguage(query);
+    console.log(`🌐 Query language detected: ${targetLang}`);
+
     let attempts = 0;
-    const maxAttempts = 5; // Try to find a meaningful image up to 5 times
+    const maxAttempts = 10; // Try more times to find language-matching pins
     let meaningfulPins = [];
 
     while (meaningfulPins.length < count && attempts < maxAttempts) {
@@ -417,17 +457,21 @@ app.get('/api/pinterest/search-with-ocr', async (req, res) => {
         const ocrResult = await extractTextWithLens(imgUrl);
         const extractedText = ocrResult.text;
 
-        if (checkIfMeaningful(extractedText)) {
-          console.log(`✅ Meaningful text found for pin ${pin.id}: ${extractedText.substring(0, 50)}...`);
+        if (checkIfMeaningful(extractedText, targetLang)) {
+          console.log(`✅ [${targetLang}] Pin ${pin.id}: ${extractedText.substring(0, 60)}...`);
           meaningfulPins.push({
             ...pin,
             image: imgUrl,
             extractedText: extractedText,
             language: ocrResult.language,
+            langMatch: targetLang,
             lenstext_full: extractedText, // For n8n output requirement
           });
         } else {
-          console.log(`❌ Text not meaningful for pin ${pin.id}: ${extractedText.substring(0, 50)}... Re-searching...`);
+          const reason = extractedText.length >= 20
+            ? `lang mismatch (need ${targetLang})`
+            : 'text too short';
+          console.log(`❌ ${reason} for pin ${pin.id}: "${extractedText.substring(0, 40)}..." Re-searching...`);
         }
       }
       // Update bookmark for next iteration if needed
