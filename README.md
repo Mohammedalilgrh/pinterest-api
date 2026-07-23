@@ -5,8 +5,8 @@ A **self-hosted API** that searches Pinterest, downloads images, and extracts te
 ### What You Can Do
 - 🔍 **Search** any niche on Pinterest → get image URLs, titles, pin links
 - 🖼️ **Download** any image → save it locally or to cloud storage
-- 📝 **OCR** → extract text/quotes from images (free, no API key needed)
-- 🔎 **Google Lens** → better text extraction than OCR, gets text from any image
+- 📝 **OCR** → extract text/quotes from images (free, no API key needed, **now with improved Arabic & English support and image preprocessing**)
+- 🔎 **Google Lens** → (Currently falls back to enhanced Tesseract.js due to datacenter IP blocking) better text extraction than standard Tesseract, gets text from any image
 
 ---
 
@@ -139,6 +139,7 @@ GET https://pinterest-api.onrender.com/api/pinterest/download?url=https://i.pini
 ### 3. OCR — Extract Text from Image 📝
 
 Extract text/quotes from any image. Works great for quote graphics, signs, and screenshots.
+**Now with improved accuracy for both Arabic and English through image preprocessing!**
 
 ```
 POST /api/pinterest/ocr
@@ -160,7 +161,7 @@ Content-Type: application/json
 
 ### 4. Google Lens — Extract Text from Any Image 🔎
 
-**Better than OCR.** Google Lens detects text from images way more accurately than Tesseract. It works on quote graphics, signs, screenshots, handwriting — anything.
+**Note:** Due to Google blocking datacenter IP addresses, this endpoint currently falls back to using the enhanced Tesseract.js OCR. While the original intent was to leverage Google Lens for superior accuracy, this is a current environmental limitation. The enhanced Tesseract.js offers improved Arabic and English recognition.
 
 ```
 POST /api/pinterest/lens
@@ -197,7 +198,7 @@ Content-Type: application/json
 | `method` | Description | Speed |
 |---|---|---|
 | `tesseract` | Tesseract.js (local, no browser) | 1-3 seconds |
-| `google_lens` | Google Lens (uses Playwright browser) | 8-15 seconds |
+| `google_lens` | Currently falls back to enhanced Tesseract.js (due to IP blocking) | 1-3 seconds (like Tesseract) |
 | `both` | Returns results from both methods | Slowest |
 
 **Response with `both`:**
@@ -310,6 +311,7 @@ pinterest-api/
 
 ## 📝 Notes & Tips
 
+- **OCR Accuracy Enhanced:** Image preprocessing (grayscale, contrast adjustment) is now applied before Tesseract.js recognition, significantly boosting text extraction accuracy for both Arabic and English.
 - **Search works best when logged in.** Pinterest requires authentication for search results. Create a free throwaway Pinterest account.
 - **The server uses Playwright (Chromium).** It runs a headless browser to load Pinterest and intercept the internal API. Takes 3-5 seconds per search.
 - **OCR is free** and runs locally using Tesseract.js. No API keys needed.
@@ -325,10 +327,10 @@ pinterest-api/
 | Problem | Solution |
 |---|---|
 | Search returns 0 results | Make sure `PINTEREST_EMAIL` and `PINTEREST_PASSWORD` are set in Render env vars |
-| OCR returns empty text | The image may not have clear text. Try a different image. |
+| OCR returns empty text | The image may not have clear text or preprocessing might need tuning. Try a different image. |
 | Server slow on first request | Render cold starts after inactivity. UptimeRobot pings prevent this. |
 | "Cannot find playwright" | Make sure you're using **Docker** runtime on Render, not Node. |
-| Login keeps failing | Pinterest may block login from certain IPs. Use a US-based region on Render. |
+| Login keeps failing | Pinterest may block login from certain IPs. Ensure you are using a US-based region on Render. |
 
 ---
 
