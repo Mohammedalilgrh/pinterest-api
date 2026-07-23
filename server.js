@@ -2,13 +2,14 @@ const express = require('express');
 const { chromium } = require('playwright-extra');
 const stealth = require('puppeteer-extra-plugin-stealth')();
 chromium.use(stealth);
-const { createWorker } = require('tesseract.js');
+import Lens from 'chrome-lens-ocr';
+import dotenv from 'dotenv';
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios'); // For fetching image data as buffer
-const sharp = require('sharp'); // For image preprocessing
-const { ocrImage } = require('./utils/googleLensOcr');
+
+dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -22,6 +23,35 @@ app.use(cors());
 app.use(express.json({ limit: '5mb' }));
 
 let loggedIn = false;
+
+// Initialize Lens instance
+const lens = new Lens({
+  chromeVersion: '124.0.6367.60',
+  userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+});
+
+function checkIfMeaningful(text) {
+  const minWords = 5;
+  const minChars = 20;
+  const hasLetters = /[a-zA-Z؀-ۿ]/.test(text); // Checks for English or Arabic letters
+  const isMostlyAlphaNumeric = (text.replace(/[^a-zA-Z0-9؀-ۿ\s]/g, '').length / text.length) > 0.7;
+  const wordCount = text.split(/\s+/).filter(Boolean).length;
+
+  return text.length >= minChars && wordCount >= minWords && hasLetters && isMostlyAlphaNumeric;
+}
+
+async function extractTextWithLens(imageUrl) {
+  try {
+    console.log(`🔍 Lens OCR: ${imageUrl.substring(0, 60)}...`);
+    const result = await lens.scanByURL(imageUrl);
+    const text = result.segments.map(s => s.text).join(' ').trim();
+    console.log(`✅ Lens OCR: ${text.substring(0, 80)}... (lang: ${result.language || 'N/A'})`);
+    return { text, language: result.language };
+  } catch (err) {
+    console.error('❌ Lens OCR error:', err.message?.substring(0, 80));
+    return { text: '', language: '', error: err.message };
+  }
+}
 
 // ──────────────────────────────────────────────
 // Pinterest Login
@@ -314,263 +344,114 @@ app.get('/api/pinterest/download', async (req, res) => {
   }
 });
 
-let ocrWorker = null;
-
-// ──────────────────────────────────────────────
-// Simple Tesseract OCR (no native deps, works on Render)
-// ──────────────────────────────────────────────
-
-async function extractTextSimple(imageUrl) {
-  try {
-    if (!ocrWorker) ocrWorker = await createWorker('eng+ara');
-    console.log(`🔍 OCR: ${imageUrl.substring(0, 60)}...`);
-
-    // 1. Fetch the image as a buffer
-    const response = await axios.get(imageUrl, { responseType: 'arraybuffer' });
-    const imageBuffer = Buffer.from(response.data);
-
-    // 2. Preprocess with Sharp
-    const processedImageBuffer = await sharp(imageBuffer)
-      .grayscale()
-      .normalize()
-      .toBuffer();
-
-    // 3. Recognize with Tesseract.js
-    const { data } = await ocrWorker.recognize(processedImageBuffer);
-    const text = data.text?.trim() || '';
-    console.log(`✅ OCR: ${text.substring(0, 80)}... (conf: ${Math.round(data.confidence || 0)})`);
-    return { text, confidence: Math.round(data.confidence || 0) };
-  } catch (err) {
-    console.error('❌ OCR error:', err.message?.substring(0, 80));
-    return { text: '', confidence: 0 };
-  }
-}
-
-async function extractTextViaLens(imageUrl) {
-  const ocrResult = await ocrImage(imageUrl);
-  if (ocrResult.success) {
-    return { text: ocrResult.text, confidence: 100 }; // Assuming high confidence if Google Lens succeeds
-  }
-  return { text: '', confidence: 0, error: ocrResult.error, code: ocrResult.code };
-}
-
-// Function to filter for "complete and meaningful sentences"
-function lensText(rawText) {
-    if (!rawText || typeof rawText !== 'string' || rawText.trim().length === 0) {
-        return null;
-    }
-
-    const qualifyingSentences = [];
-    let currentSentence = [];
-    const terminators = ['.', '!', '?', '\n']; // Explicit sentence terminators
-
-    for (let i = 0; i < rawText.length; i++) {
-        const char = rawText[i];
-        currentSentence.push(char);
-
-        // Check if the current character is a terminator
-        if (terminators.includes(char)) {
-            let sentence = currentSentence.join('').trim();
-            if (sentence.length > 0) {
-
-                // Apply filtering logic to 'sentence'
-                if (!/[a-zA-Z0-9]/.test(sentence)) { // Ensure it has actual words/numbers
-                    currentSentence = []; // Discard and reset
-                    continue;
-                }
-
-                const words = sentence.split(/\s+/).filter(word => word.length > 0);
-                // Revert to stricter minimum length check
-                if (words.length < 4) { // Minimum Length Check (e.g., 4 words)
-                    currentSentence = [];
-                    continue;
-                }
-
-                const alphanumericCount = (sentence.match(/[a-zA-Z0-9]/g) || []).length;
-                const totalCount = sentence.length;
-
-                if (totalCount > 10 && (alphanumericCount / totalCount < 0.7)) { // Less than 70% alphanumeric for longer sentences
-                    currentSentence = [];
-                    continue;
-                }
-                if (totalCount <= 10 && totalCount > 0 && (alphanumericCount / totalCount < 0.85)) { // Less than 85% alphanumeric for shorter sentences
-                    currentSentence = [];
-                    continue;
-                }
-
-                const errorKeywords = ['Error:', 'Traceback', 'def ', 'import ', 'function ', 'class ', 'SyntaxError', 'TypeError', 'HTTP ERROR', 'Failed'];
-                if (errorKeywords.some(keyword => sentence.includes(keyword))) { // Error Keyword Detection
-                    currentSentence = [];
-                    continue;
-                }
-
-
-                qualifyingSentences.push(sentence);
-            }
-            currentSentence = []; // Reset buffer after a terminator
-        }
-    }
-
-    // Process any remaining text in currentSentence buffer if no terminator at end of string
-    if (currentSentence.length > 0) {
-        let sentence = currentSentence.join('').trim();
-        if (sentence.length > 0) {
-            // Apply filtering logic
-            if (!/[a-zA-Z0-9]/.test(sentence)) {
-                // do nothing
-            } else {
-                const words = sentence.split(/\s+/).filter(word => word.length > 0);
-                // Revert to stricter minimum length check
-                if (words.length >= 4) { // Minimum Length Check
-                    const alphanumericCount = (sentence.match(/[a-zA-Z0-9]/g) || []).length;
-                    const totalCount = sentence.length;
-
-                    if (totalCount > 10 && (alphanumericCount / totalCount < 0.7)) {
-                        // do nothing
-                    } else if (totalCount <= 10 && totalCount > 0 && (alphanumericCount / totalCount < 0.85)) {
-                        // do nothing
-                    } else {
-                        const errorKeywords = ['Error:', 'Traceback', 'def ', 'import ', 'function ', 'class ', 'SyntaxError', 'TypeError', 'HTTP ERROR', 'Failed'];
-                        if (!errorKeywords.some(keyword => sentence.includes(keyword))) {
-                            // Punctuation Check - more lenient for trailing sentence
-                            if (!/[.!?]$/.test(sentence)) {
-                                if (words.length >= 6) { // If long enough and meaningful without end punctuation
-                                     qualifyingSentences.push(sentence);
-                                }
-                            } else {
-                                qualifyingSentences.push(sentence); // Has punctuation, so it's good
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    return qualifyingSentences.length > 0 ? qualifyingSentences.join('\n') : null;
-}
 
 app.post('/api/pinterest/ocr', async (req, res) => {
   try {
     const imageUrl = req.body?.url;
     if (!imageUrl) return res.status(400).json({ success: false, error: 'Missing "url"' });
-    const method = req.body?.method || 'tesseract'; // Default to tesseract
-
-    let result;
-    if (method === 'google_lens') {
-      result = await extractTextViaLens(imageUrl);
-    } else if (method === 'both') {
-      const tesseractResult = await extractTextSimple(imageUrl);
-      const lensResult = await extractTextViaLens(imageUrl);
-      return res.json({
-        success: tesseractResult.text || lensResult.text,
-        results: [
-          { text: tesseractResult.text, source: 'tesseract', confidence: tesseractResult.confidence },
-          { text: lensResult.text, source: 'google_lens' }
-        ]
-      });
-    } else {
-      result = await extractTextSimple(imageUrl);
-    }
-
+    const result = await extractTextWithLens(imageUrl);
     res.json({
       success: !!result.text,
       text: result.text,
-      confidence: result.confidence,
+      language: result.language,
+      error: result.error || null,
     });
   } catch (err) {
-    res.status(500).json({ success: false, error: 'OCR failed', details: err.message });
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// ⭐ Lens endpoint
 app.post('/api/pinterest/lens', async (req, res) => {
+  try {
+    const imageUrl = req.body?.url;
+    if (!imageUrl) return res.status(400).json({ success: false, error: 'Missing "url"' });
+    const result = await extractTextWithLens(imageUrl);
+    res.json({
+      success: !!result.text,
+      text: result.text,
+      language: result.language,
+      error: result.error || null,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
 
-app.get('/api/pinterest/search-and-lens', async (req, res) => {
+// New powerful search endpoint
+app.get('/api/pinterest/search-with-ocr', async (req, res) => {
   try {
     const query = req.query.q || req.query.query || req.query.search;
     if (!query) {
       return res.status(400).json({ success: false, error: 'Missing ?q parameter' });
     }
 
-    const requestedCount = parseInt(req.query.count || req.query.limit || '10', 10);
-    const imageSize = req.query.size || 'medium';
-    let currentPage = parseInt(req.query.page || '1', 10); // Start page for Pinterest search
-    let bookmark = req.query.bookmark || null;
+    const count = parseInt(req.query.count || req.query.limit || '10', 10);
+    const size = req.query.size || 'medium';
+    const bookmark = req.query.bookmark || null;
 
-    const finalLensedPins = [];
-    const MAX_PINTEREST_PAGES_TO_SEARCH = 5; // Limit to prevent infinite loops
+    console.log(`🔍 Searching with OCR: "${query}" (count: ${count})`);
 
-        for (let pageNum = 0; finalLensedPins.length < requestedCount && pageNum < MAX_PINTEREST_PAGES_TO_SEARCH; pageNum++) {
-      console.log(`🔍 Search & Lens: Page ${currentPage}, Pins needed: ${requestedCount - finalLensedPins.length}`);
-      const { pins, bookmark: newBookmark } = await searchPinterest(query, Math.max(requestedCount, 50), bookmark); // Fetch more pins to ensure enough qualifying ones
-      bookmark = newBookmark; // Update bookmark for next iteration
+    let attempts = 0;
+    const maxAttempts = 5; // Try to find a meaningful image up to 5 times
+    let meaningfulPins = [];
+
+    while (meaningfulPins.length < count && attempts < maxAttempts) {
+      attempts++;
+      const searchResult = await searchPinterest(query, 1, bookmark); // Get 1 pin at a time
+      const pins = searchResult.pins;
 
       if (pins.length === 0) {
-        console.log('No more pins found on Pinterest.');
-        break; // No more pins to process
+        console.log('No more pins found in search result. Ending attempts.');
+        break;
       }
 
       for (const pin of pins) {
-        if (finalLensedPins.length >= requestedCount) break;
+        if (meaningfulPins.length >= count) break;
 
-        let augmentedPin = { ...pin, lensedText: null, ocrError: null };
+        let imgUrl = pin.image;
+        if (imgUrl) {
+          if (size === 'small') imgUrl = imgUrl.replace(/\/\d+x\//, '/236x/');
+          else if (size === 'medium') imgUrl = imgUrl.replace(/\/\d+x\//, '/564x/');
+        }
 
-        if (pin.image) {
-          const ocrResult = await extractTextViaLens(pin.image);
-          if (ocrResult.success && ocrResult.text) {
-            const lensedText = lensText(ocrResult.text);
-            if (lensedText) {
-              augmentedPin.lensedText = lensedText;
-              finalLensedPins.push(augmentedPin);
-            } else {
-              // Pin did not qualify after lensing
-              // console.log(`Skipped pin ${pin.id}: Text did not qualify after lensing.`);
-            }
-          } else {
-            augmentedPin.ocrError = ocrResult.error || 'No text extracted or OCR failed.';
-            // console.log(`Skipped pin ${pin.id}: OCR failed or no text. Error: ${augmentedPin.ocrError}`);
-          }
+        const ocrResult = await extractTextWithLens(imgUrl);
+        const extractedText = ocrResult.text;
+
+        if (checkIfMeaningful(extractedText)) {
+          console.log(`✅ Meaningful text found for pin ${pin.id}: ${extractedText.substring(0, 50)}...`);
+          meaningfulPins.push({
+            ...pin,
+            image: imgUrl,
+            extractedText: extractedText,
+            language: ocrResult.language,
+            lenstext_full: extractedText, // For n8n output requirement
+          });
         } else {
-          // console.log(`Skipped pin ${pin.id}: No image URL.`);
+          console.log(`❌ Text not meaningful for pin ${pin.id}: ${extractedText.substring(0, 50)}... Re-searching...`);
         }
       }
-
-      if (!bookmark) {
-        console.log('No more pages to search on Pinterest.');
-        break; // No more pages
+      // Update bookmark for next iteration if needed
+      if (searchResult.bookmark) {
+        bookmark = searchResult.bookmark;
+      } else if (pins.length > 0) { // If no new bookmark, but pins were found, try next attempt without bookmark
+        console.log('No new bookmark, but more pins might exist. Continuing search without bookmark.');
+      } else {
+        console.log('No more pins to search. Ending attempts.');
+        break;
       }
-      currentPage++;
     }
-
 
     res.json({
       success: true,
       query,
-      count: finalLensedPins.length,
-      data: finalLensedPins,
-    });
-
-  } catch (err) {
-    console.error('Search and Lens endpoint error:', err.message);
-    res.status(500).json({ success: false, error: 'Search and Lens failed', details: err.message });
-  }
-});
-
-
-  try {
-    const imageUrl = req.body?.url;
-    if (!imageUrl) return res.status(400).json({ success: false, error: 'Missing "url"' });
-    const ocrResult = await extractTextViaLens(imageUrl);
-    const lensedText = ocrResult.text ? lensText(ocrResult.text) : null;
-    res.json({
-      success: !!lensedText,
-      text: lensedText,
-      source: 'google_lens',
-      error: ocrResult.error || null,
+      count: meaningfulPins.length,
+      hasMore: meaningfulPins.length === count && attempts < maxAttempts, // Indicate if more could be fetched
+      bookmark: bookmark || '',
+      data: meaningfulPins,
     });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    console.error('Search with OCR endpoint error:', err.message);
+    res.status(500).json({ success: false, error: 'Search with OCR failed', details: err.message });
   }
 });
 
@@ -582,8 +463,9 @@ app.get('/', (req, res) => {
       search: 'GET /api/pinterest/search?q=YOUR_QUERY&count=10&size=medium',
       bookmark: 'Pass &bookmark=VALUE from previous response for next page',
       download: 'GET /api/pinterest/download?url=IMAGE_URL',
-      ocr: 'POST /api/pinterest/ocr { "url": "IMAGE_URL", "method": "both|tesseract|google_lens" }',
-      lens: 'POST /api/pinterest/lens { "url": "IMAGE_URL" }  (⭐ Google Lens ONLY - cleaner text)',
+      ocr: 'POST /api/pinterest/ocr { "url": "IMAGE_URL" } (Uses Google Lens for cleaner text)',
+      lens: 'POST /api/pinterest/lens { "url": "IMAGE_URL" } (Google Lens ONLY - cleaner text)',
+      searchWithOcr: 'GET /api/pinterest/search-with-ocr?q=YOUR_QUERY&count=10&size=medium (Searches Pinterest and extracts meaningful text using Google Lens, re-searching if needed)',
     },
   });
 });
@@ -618,5 +500,3 @@ process.on('uncaughtException', (err) => {
 process.on('unhandledRejection', (err) => {
   console.error('💥 Unhandled:', err.message?.substring(0, 100));
 });
-
-module.exports = { lensText }; // Export lensText for testing and potential external use

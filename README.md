@@ -1,110 +1,90 @@
 # Pinterest API — Search, Download & Extract Text from Images
 
-A **self-hosted API** that searches Pinterest, downloads images, and extracts text from images (OCR). Designed for **n8n HTTP Request nodes**.
+A **self-hosted Node.js API** that searches Pinterest, downloads images, and extracts text using Google Lens OCR. Built for **n8n**, **Make (Integromat)**, or any HTTP client.
 
-### What You Can Do
-- 🔍 **Search** any niche on Pinterest → get image URLs, titles, pin links
-- 🖼️ **Download** any image → save it locally or to cloud storage
-- 📝 **OCR** → extract text/quotes from images (free, no API key needed, **now with improved Arabic & English support and image preprocessing**)
-- 🔎 **Google Lens** → (Currently falls back to enhanced Tesseract.js due to datacenter IP blocking) better text extraction than standard Tesseract, gets text from any image
+![Node](https://img.shields.io/badge/node-%3E%3D18-brightgreen)
+![License](https://img.shields.io/badge/license-MIT-blue)
+![Docker](https://img.shields.io/badge/deploy-docker-blueviolet)
 
 ---
 
-## 🚀 Deploy to Render (Free — 10 minutes)
+## 🚀 Quick Deploy (Render — Free)
 
-### Step 1: Create a GitHub Repository
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://dashboard.render.com/new?type=web)
 
-1. Go to [github.com/new](https://github.com/new)
-2. Create a repository called `pinterest-api` (or any name)
-3. Run these commands in your terminal:
+### 1. Fork / Clone this Repo
 
 ```bash
-cd "C:\Users\lraq laptop\Desktop\pinterest-api"
-git init
-git add .
-git commit -m "Initial commit"
-git branch -M main
-git remote add origin https://github.com/YOUR_USERNAME/pinterest-api.git
-git push -u origin main
+git clone https://github.com/YOUR_USERNAME/pinterest-api.git
+cd pinterest-api
 ```
 
-### Step 2: Deploy on Render
+### 2. Deploy on Render
 
-1. Go to [dashboard.render.com](https://dashboard.render.com) and click **New +** → **Web Service**
-2. Connect your GitHub and select `pinterest-api`
-3. Fill in these settings:
+1. Go to [dashboard.render.com](https://dashboard.render.com) → **New +** → **Web Service**
+2. Connect your GitHub repo
+3. Use these settings:
 
 | Field | Value |
 |---|---|
 | **Name** | `pinterest-api` |
-| **Runtime** | **Docker** (important — needed for Chromium) |
+| **Runtime** | **Docker** ⚠️ (Must be Docker, not Node) |
 | **Branch** | `main` |
-| **Plan** | **Free** (512 MB RAM, works perfectly with Playwright) |
+| **Plan** | **Free** |
 
-4. Under **Environment Variables**, add these:
+4. Add **Environment Variables**:
 
-| Key | Value | Required? |
+| Key | Required | Description |
 |---|---|---|
-| `PINTEREST_EMAIL` | Your Pinterest account email | ✅ Yes for search |
-| `PINTEREST_PASSWORD` | Your Pinterest account password | ✅ Yes for search |
+| `PINTEREST_EMAIL` | ✅ | Your Pinterest login email |
+| `PINTEREST_PASSWORD` | ✅ | Your Pinterest login password |
+| `PORT` | ❌ | Defaults to `3000` |
 
-5. Click **Deploy Web Service**
-6. Wait 3-5 minutes for the build to finish
-7. Your URL will be: `https://pinterest-api.onrender.com`
+5. Click **Create Web Service** and wait 3–5 minutes for the build.
+6. Your URL: `https://pinterest-api.onrender.com`
 
-> ⚠️ **Note:** Pinterest requires a logged-in account to search. Create a free Pinterest account just for this API, then set the email/password in the Render environment variables.
+> ⚠️ **Important:** Pinterest requires a logged-in account to show search results. Create a **free throwaway Pinterest account** and use those credentials.
 
-### Step 3: Keep it Alive with UptimeRobot
+### 3. Keep It Alive (UptimeRobot)
 
-1. Go to [uptimerobot.com](https://uptimerobot.com) (free plan)
-2. Click **Add New Monitor**
-3. Set:
-   - **Monitor Type:** HTTP(s)
-   - **Friendly Name:** Pinterest API
-   - **URL:** `https://pinterest-api.onrender.com/`
-   - **Interval:** 5 minutes
-4. Click **Create Monitor**
-5. Render free plan sleeps after 15 min of inactivity — UptimeRobot keeps it awake
+Render free plan **sleeps after 15 minutes of inactivity**. Use UptimeRobot to ping every 5 minutes:
+
+1. Go to [uptimerobot.com](https://uptimerobot.com) (free)
+2. **Add New Monitor** → HTTP(s) → URL: `https://pinterest-api.onrender.com/`
+3. Interval: **5 minutes**
 
 ---
 
-## 📡 API Endpoints
+## 📡 API Endpoints — Full Reference
 
 ### 1. Search Pinterest 🔍
 
 ```
-GET /api/pinterest/search
+GET /api/pinterest/search?q=KEYWORD&count=10&size=medium&bookmark=
 ```
 
-| Parameter | Required | Default | Description |
+#### Parameters
+
+| Parameter | Type | Default | Description |
 |---|---|---|---|
-| `q` (or `query`, `search`) | ✅ Yes | — | Your niche / keyword |
-| `count` (or `limit`) | ❌ No | `10` | Number of results (1-50) |
-| `size` | ❌ No | `medium` | `small` = 236px, `medium` = 564px, `large` = original |
-| `page` | ❌ No | `1` | Page number (scrolls further down for fresh results) |
-| `bookmark` | ❌ No | — | Bookmark string from previous response → exact next page |
+| `q` | string | **required** | The search keyword / niche |
+| `count` | int | `10` | Results per request (max 50) |
+| `size` | string | `medium` | Image size: `small` (236px), `medium` (564px), `large` (original) |
+| `bookmark` | string | — | Pagination cursor from previous response |
 
-**Example request (simple):**
-```
-GET https://pinterest-api.onrender.com/api/pinterest/search?q=viral+quotes&count=5&size=large&page=2
-```
+#### Example
 
-**Example request (advanced — use bookmark for exact pagination):**
-```
-// First call:
-GET ...?q=viral+quotes&count=5
-// Response includes: "bookmark": "abc123..."
-// Second call (next exact page):
-GET ...?q=viral+quotes&count=5&bookmark=abc123...
+```bash
+curl "https://pinterest-api.onrender.com/api/pinterest/search?q=motivational+quotes&count=3&size=large"
 ```
 
-**Example response:**
+#### Response
+
 ```json
 {
   "success": true,
-  "query": "viral quotes",
-  "count": 5,
-  "page": 2,
+  "query": "motivational quotes",
+  "count": 3,
   "hasMore": true,
   "bookmark": "WyJQSU4iLDE3MzI5ODk...",
   "data": [
@@ -119,27 +99,42 @@ GET ...?q=viral+quotes&count=5&bookmark=abc123...
 }
 ```
 
-> 💡 **To always get fresh results:** In n8n, use an **Item Lists → Summarize** node to extract the `bookmark` from each response, then pass it to the next execution's HTTP request as `&bookmark={{ $json.bookmark }}`. Or simply increment the `page` parameter each time.
+#### Pagination
+
+Pass the `bookmark` from one response to the next request to get the exact next page:
+
+```bash
+# First request
+GET /api/pinterest/search?q=quotes&count=5
+# → "bookmark": "WyJQSU4iLDE3MzI5ODk..."
+
+# Second request (next page)
+GET /api/pinterest/search?q=quotes&count=5&bookmark=WyJQSU4iLDE3MzI5ODk...
+```
+
+---
 
 ### 2. Download Image 🖼️
 
-Download the actual image file (binary). The URL comes from the search results.
+Download any Pinterest image as binary data.
 
 ```
-GET /api/pinterest/download?url=https://i.pinimg.com/...
+GET /api/pinterest/download?url=IMAGE_URL
 ```
 
-**Example:**
+#### Example
+
+```bash
+curl "https://pinterest-api.onrender.com/api/pinterest/download?url=https://i.pinimg.com/originals/abc123/image.jpg" --output image.jpg
 ```
-GET https://pinterest-api.onrender.com/api/pinterest/download?url=https://i.pinimg.com/originals/abc123/image.jpg
-```
 
-> Response is binary image data. In n8n, set **Response Format → File** to save it.
+In **n8n**: Set **Response Format** → `File` to save the binary.
 
-### 3. OCR — Extract Text from Image 📝
+---
 
-Extract text/quotes from any image. Works great for quote graphics, signs, and screenshots.
-**Now with improved accuracy for both Arabic and English through image preprocessing!**
+### 3. OCR — Extract Text with Google Lens 🔎
+
+Extract text from any image using **Google Lens**. Much more accurate than Tesseract — handles stylized fonts, handwriting, and complex backgrounds.
 
 ```
 POST /api/pinterest/ocr
@@ -150,18 +145,30 @@ Content-Type: application/json
 }
 ```
 
-**Response (1-3 seconds):**
+#### Example (cURL)
+
+```bash
+curl -X POST "https://pinterest-api.onrender.com/api/pinterest/ocr" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://i.pinimg.com/originals/abc123/image.jpg"}'
+```
+
+#### Response (1–3 seconds)
+
 ```json
 {
   "success": true,
   "text": "Believe you can and you're halfway there.\n- Theodore Roosevelt",
-  "confidence": 0.92
+  "language": "en",
+  "error": null
 }
 ```
 
-### 4. Google Lens — Extract Text from Any Image 🔎
+---
 
-**Note:** Due to Google blocking datacenter IP addresses, this endpoint currently falls back to using the enhanced Tesseract.js OCR. While the original intent was to leverage Google Lens for superior accuracy, this is a current environmental limitation. The enhanced Tesseract.js offers improved Arabic and English recognition.
+### 4. Google Lens Endpoint 🔎
+
+Alias for the OCR endpoint — same functionality.
 
 ```
 POST /api/pinterest/lens
@@ -172,168 +179,288 @@ Content-Type: application/json
 }
 ```
 
-**Response (8-15 seconds — Lens processes the image):**
+#### Response (8–15 seconds)
+
 ```json
 {
   "success": true,
   "text": "Believe you can and you're halfway there.\n- Theodore Roosevelt",
-  "source": "google_lens"
+  "language": "en",
+  "error": null
 }
 ```
 
-### 5. OCR with Method Choice — Tesseract, Lens, or Both 📝
+---
 
-Same as OCR endpoint but you can choose the extraction method:
+### 5. Search with OCR 🔍+🔎
+
+Searches Pinterest and **automatically runs OCR on each pin image**, re-searching until it finds pins with meaningful text.
 
 ```
-POST /api/pinterest/ocr
-Content-Type: application/json
-
-{
-  "url": "https://i.pinimg.com/originals/abc123/image.jpg",
-  "method": "google_lens"
-}
+GET /api/pinterest/search-with-ocr?q=KEYWORD&count=10&size=medium
 ```
 
-| `method` | Description | Speed |
-|---|---|---|
-| `tesseract` | Tesseract.js (local, no browser) | 1-3 seconds |
-| `google_lens` | Currently falls back to enhanced Tesseract.js (due to IP blocking) | 1-3 seconds (like Tesseract) |
-| `both` | Returns results from both methods | Slowest |
+#### Parameters
 
-**Response with `both`:**
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `q` | string | **required** | Search keyword |
+| `count` | int | `10` | Number of meaningful results |
+| `size` | string | `medium` | Image size |
+
+#### Response
+
 ```json
 {
   "success": true,
-  "results": [
-    { "text": "...", "source": "google_lens" },
-    { "text": "...", "source": "tesseract", "confidence": 92 }
+  "query": "motivational quotes",
+  "count": 5,
+  "hasMore": true,
+  "bookmark": "WyJQSU4iLDE3MzI5ODk...",
+  "data": [
+    {
+      "id": "123456789",
+      "title": "Believe in Yourself",
+      "description": "Believe you can and you're halfway there.",
+      "image": "https://i.pinimg.com/originals/abc123/image.jpg",
+      "link": "https://www.pinterest.com/pin/123456789/",
+      "extractedText": "Believe you can and you're halfway there.\n- Theodore Roosevelt",
+      "language": "en",
+      "lenstext_full": "Believe you can and you're halfway there.\n- Theodore Roosevelt"
+    }
   ]
 }
 ```
 
+---
+
 ### 6. Health Check 💚
+
 ```
 GET /
 ```
 
-Returns the server status and all available endpoints.
+Returns server status, login state, and all available endpoints.
+
+```json
+{
+  "status": "alive",
+  "name": "Pinterest API",
+  "version": "1.2.0",
+  "loggedIn": true,
+  "note": "Set PINTEREST_EMAIL & PINTEREST_PASSWORD in env for search",
+  "endpoints": {
+    "search": "GET /api/pinterest/search?q=YOUR_QUERY&count=10&size=medium",
+    "bookmark": "Pass &bookmark=VALUE from previous response for next page",
+    "download": "GET /api/pinterest/download?url=IMAGE_URL",
+    "ocr": "POST /api/pinterest/ocr { \"url\": \"IMAGE_URL\" }",
+    "lens": "POST /api/pinterest/lens { \"url\": \"IMAGE_URL\" }",
+    "searchWithOcr": "GET /api/pinterest/search-with-ocr?q=YOUR_QUERY&count=10&size=medium"
+  }
+}
+```
 
 ---
 
-## 🔧 Using in n8n
+## 🔧 n8n Workflow Examples
 
-### Workflow: Search Pinterest, Get Images & Extract Quotes
+### Workflow 1: Search Pinterest & Get Quote Images
 
-```
-[HTTP Request] Search Pinterest
-        ↓
+```text
+[HTTP Request] → Search Pinterest
+       ↓
+[Item Lists → Split Out Items]
+       ↓
 [Loop Over Items] for each pin
-        ├──→ [HTTP Request] Download image → [Write Binary File]
-        └──→ [HTTP Request] Lens → extract quote text
+       ├── → [HTTP Request] Download image
+       └── → [HTTP Request] Extract text via Lens
+       ↓
+[Google Sheets / Telegram / Notion] → Save results
 ```
 
-#### Step 1: HTTP Request Node — Search
+**Step 1 — HTTP Request Node (Search):**
 
 | Setting | Value |
 |---|---|
-| **Method** | `GET` |
-| **URL** | `https://pinterest-api.onrender.com/api/pinterest/search` |
-| **Query Parameters** | `q` = `your search term`, `count` = `10`, `size` = `large` |
-| **Response Format** | `JSON` |
+| Method | `GET` |
+| URL | `https://pinterest-api.onrender.com/api/pinterest/search?q=your+keyword&count=10&size=large` |
+| Response Format | `JSON` |
 
-Output: `{{ $json.data }}` is an array of pins with `id`, `title`, `description`, `image`, `link`
+Output path: `$json.data` — an array of pins.
 
-#### Step 2: Loop Over Items
+**Step 2 — Split Out Items:**
 
-In the Loop node settings, add Items mode:
-```
-{{ $json.data }}
-```
+Use **Item Lists → Split Out Items** to process each pin individually.
 
-#### Step 3: HTTP Request Node — Download (inside loop)
+**Step 3 — HTTP Request Node (Download):**
 
 | Setting | Value |
 |---|---|
-| **Method** | `GET` |
-| **URL** | `https://pinterest-api.onrender.com/api/pinterest/download?url={{ $json.image }}` |
-| **Response Format** | `File` |
+| Method | `GET` |
+| URL | `https://pinterest-api.onrender.com/api/pinterest/download?url={{ $json.image }}` |
+| Response Format | `File` |
 
-#### Step 4: HTTP Request Node — Google Lens Text Extraction (⭐ recommended)
+**Step 4 — HTTP Request Node (Lens OCR):**
 
 | Setting | Value |
 |---|---|
-| **Method** | `POST` |
-| **URL** | `https://pinterest-api.onrender.com/api/pinterest/lens` |
-| **Body** | `{ "url": "{{ $json.image }}" }` |
-| **Headers** | `Content-Type`: `application/json` |
-| **Response Format** | `JSON` |
+| Method | `POST` |
+| URL | `https://pinterest-api.onrender.com/api/pinterest/lens` |
+| Body | `{ "url": "{{ $json.image }}" }` |
+| Headers | `Content-Type: application/json` |
+| Response Format | `JSON` |
 
-⏱ Takes 8-15 seconds per image but gets text right even on stylized quote graphics.
+Output: `$json.text` contains the extracted quote.
 
-Output: `{{ $json.text }}` = the quote text. Save it to Google Sheets / Telegram / Notion.
+### Workflow 2: Multi-Page Search
+
+Use an **n8n Loop** node to paginate through results:
+
+1. **HTTP Request** → Search with `?q=quotes&count=10`
+2. Extract `bookmark` from response
+3. **Loop** → use bookmark from previous iteration in `&bookmark={{ $json.bookmark }}`
+4. Continue until `hasMore` is `false`
+
+### Workflow 3: Scheduled Quote Collector
+
+1. **Schedule Trigger** (e.g., every 6 hours)
+2. **HTTP Request** → `GET /api/pinterest/search-with-ocr?q=life+quotes&count=5`
+3. **Item Lists** → filter out pins with empty `extractedText`
+4. **Google Sheets** → append rows with title, quote, image URL, pin link
 
 ---
 
-## 🧪 Local Testing
+## 🧪 Local Development
 
-Want to test before deploying?
+### Prerequisites
+- Node.js ≥ 18
+- Playwright system dependencies (see Dockerfile)
+
+### Setup
 
 ```bash
-cd "C:\Users\lraq laptop\Desktop\pinterest-api"
+# Clone
+git clone https://github.com/YOUR_USERNAME/pinterest-api.git
+cd pinterest-api
+
+# Install dependencies
 npm install
-npm start
-```
 
-Then visit: `http://localhost:3000/`
+# Install Chromium for Playwright
+npx playwright install chromium
 
-To test search locally, set your Pinterest credentials:
-```bash
+# Set credentials (optional — search works without, but results are limited)
 set PINTEREST_EMAIL=your@email.com
 set PINTEREST_PASSWORD=yourpassword
+
+# Start
 npm start
+```
+
+Visit: `http://localhost:3000`
+
+### Windows Users
+
+If you get Playwright errors, install the browser manually:
+
+```bash
+npx playwright install chromium
 ```
 
 ---
 
-## 📁 Project Files
+## 🐳 Docker
+
+### Build & Run Locally
+
+```bash
+docker build -t pinterest-api .
+docker run -p 3000:3000 \
+  -e PINTEREST_EMAIL=your@email.com \
+  -e PINTEREST_PASSWORD=yourpassword \
+  pinterest-api
+```
+
+### docker-compose.yml
+
+```yaml
+version: '3.8'
+services:
+  pinterest-api:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - PINTEREST_EMAIL=your@email.com
+      - PINTEREST_PASSWORD=yourpassword
+    restart: unless-stopped
+```
+
+---
+
+## 📁 Project Structure
 
 ```
 pinterest-api/
-├── server.js          ← All API endpoints + Pinterest scraper
-├── package.json       ← Dependencies
-├── Dockerfile         ← Docker config for Render (installs Chromium)
-├── .gitignore         ← Ignores node_modules
-└── README.md          ← This file
+├── server.js            ← Main API server (all endpoints)
+├── package.json         ← Dependencies & scripts
+├── Dockerfile           ← Docker image (installs Chromium)
+├── .gitignore           ← Ignores node_modules, .env, logs
+├── .dockerignore        ← Ignores node_modules in Docker build
+└── README.md            ← This file
 ```
 
 ---
 
-## 📝 Notes & Tips
+## 🤔 How It Works
 
-- **OCR Accuracy Enhanced:** Image preprocessing (grayscale, contrast adjustment) is now applied before Tesseract.js recognition, significantly boosting text extraction accuracy for both Arabic and English.
-- **Search works best when logged in.** Pinterest requires authentication for search results. Create a free throwaway Pinterest account.
-- **The server uses Playwright (Chromium).** It runs a headless browser to load Pinterest and intercept the internal API. Takes 3-5 seconds per search.
-- **OCR is free** and runs locally using Tesseract.js. No API keys needed.
-- **Image size:** Pinterest images have different resolutions:
-  - `small` = 236px width (fast)
-  - `medium` = 564px width (good balance)
-  - `large` = Original resolution (best quality, larger file)
-- **Rate limits:** Render free plan handles thousands of requests per day easily.
-- **Cost:** $0/month — Render free plan + UptimeRobot free plan.
+### Search
+The server uses **Playwright (Chromium)** to launch a headless browser, navigate to Pinterest, and intercept Pinterest's internal API responses (`BaseSearchResource/get`). This gets you real Pinterest results without reverse-engineering their API.
 
-### Troubleshooting
+### Fresh Results
+Every search query is appended with a **random real word** + a **rotating counter** so Pinterest's CDN serves fresh results instead of returning cached JSON. The same keyword searched 10 times will produce 10 different sets of results.
 
-| Problem | Solution |
-|---|---|
-| Search returns 0 results | Make sure `PINTEREST_EMAIL` and `PINTEREST_PASSWORD` are set in Render env vars |
-| OCR returns empty text | The image may not have clear text or preprocessing might need tuning. Try a different image. |
-| Server slow on first request | Render cold starts after inactivity. UptimeRobot pings prevent this. |
-| "Cannot find playwright" | Make sure you're using **Docker** runtime on Render, not Node. |
-| Login keeps failing | Pinterest may block login from certain IPs. Ensure you are using a US-based region on Render. |
+### OCR via Google Lens
+The `chrome-lens-ocr` package sends images to Google Lens and returns extracted text. Works on:
+- Stylized quote graphics
+- Screenshots
+- Handwriting
+- Signs & posters
+- Complex backgrounds
+
+### Anti-Duplicate
+The server tracks seen pin IDs in memory and filters out duplicates. The cache clears at 5,000 pins to prevent memory bloat (~200 KB).
 
 ---
 
-## 📜 License
+## 💡 Tips & Tricks
 
-MIT — do whatever you want.
+| Tip | Detail |
+|---|---|
+| **Best Results** | Use the `search-with-ocr` endpoint to get only pins with meaningful text |
+| **Image Sizes** | Small (236px) for speed, Large (original quality) for best OCR accuracy |
+| **Rate Limits** | Render free plan handles thousands of requests/day |
+| **Cold Starts** | Render free plan sleeps after 15 min, takes ~10s to wake up |
+| **Cost** | **$0/month** — Render free plan + UptimeRobot free plan |
+| **Multiple Niches** | Each `q` parameter value can be a different niche: `?q=travel+quotes`, `?q=fitness+motivation` |
+
+---
+
+## ❗ Troubleshooting
+
+| Problem | Likely Cause | Solution |
+|---|---|---|
+| Search returns 0 results | Missing Pinterest credentials | Set `PINTEREST_EMAIL` and `PINTEREST_PASSWORD` in Render env vars |
+| OCR returns empty text | Image has no clear text | Try a different image with more text |
+| Server slow on first request | Render cold start | UptimeRobot pings prevent this |
+| "Cannot find playwright" | Runtime set to Node, not Docker | Change Render service to **Docker** runtime |
+| Login keeps failing | Pinterest blocking your IP | Try a US-based region on Render (Oregon) |
+| Docker build fails on Windows | Volume path format | Use forward slashes in docker-compose paths |
+| Playwright fails to launch | Missing system dependencies | The Dockerfile includes all required libs; use `FROM node:20-slim` |
+| High memory usage | Playwright browser | Render free plan (512 MB) is enough for Playwright |
+
+---
+
+## 📝 License
+
+MIT — do whatever you want. Contributions welcome!
