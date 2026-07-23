@@ -1,16 +1,13 @@
-import express from 'express';
-import { chromium } from 'playwright-extra';
-import stealthPlugin from 'puppeteer-extra-plugin-stealth';
+const express = require('express');
+const { chromium } = require('playwright-extra');
+const stealth = require('puppeteer-extra-plugin-stealth')();
+chromium.use(stealth);
 import Lens from 'chrome-lens-ocr';
 import dotenv from 'dotenv';
-import cors from 'cors';
-import fs from 'fs';
-import path from 'path';
-import https from 'https';
-import axios from 'axios';
-import { fileURLToPath } from 'url';
-
-chromium.use(stealthPlugin());
+const cors = require('cors');
+const fs = require('fs');
+const path = require('path');
+const axios = require('axios'); // For fetching image data as buffer
 
 dotenv.config();
 
@@ -18,10 +15,6 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const PINTEREST_EMAIL = process.env.PINTEREST_EMAIL || '';
 const PINTEREST_PASSWORD = process.env.PINTEREST_PASSWORD || '';
-
-// __dirname equivalent for ES modules
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 const STATE_FILE = path.join(__dirname, 'pinterest_auth.json');
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
@@ -37,44 +30,14 @@ const lens = new Lens({
   userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 });
 
-// Check if text contains Arabic script (Unicode block 0600-06FF)
-function containsArabic(text) {
-  return /[؀-ۿ]/.test(text);
-}
-
-// Check if text contains Latin/English letters
-function containsEnglish(text) {
-  return /[a-zA-Z]/.test(text);
-}
-
-// Detect query language: if query has Arabic chars → Arabic mode, else → English mode
-function detectQueryLanguage(query) {
-  return containsArabic(query) ? 'arabic' : 'english';
-}
-
-function checkIfMeaningful(text, targetLang = null) {
+function checkIfMeaningful(text) {
   const minWords = 5;
   const minChars = 20;
-  const hasLetters = /[a-zA-Z؀-ۿ]/.test(text);
+  const hasLetters = /[a-zA-Z؀-ۿ]/.test(text); // Checks for English or Arabic letters
   const isMostlyAlphaNumeric = (text.replace(/[^a-zA-Z0-9؀-ۿ\s]/g, '').length / text.length) > 0.7;
   const wordCount = text.split(/\s+/).filter(Boolean).length;
 
-  // Base check: text must be long enough and have letters
-  if (!(text.length >= minChars && wordCount >= minWords && hasLetters && isMostlyAlphaNumeric)) {
-    return false;
-  }
-
-  // Language-specific check
-  if (targetLang === 'arabic') {
-    // Must contain Arabic script (English mixed in is OK)
-    return containsArabic(text);
-  }
-  if (targetLang === 'english') {
-    // Must contain English/Latin letters (Arabic mixed in is OK)
-    return containsEnglish(text);
-  }
-
-  return true; // No language filter
+  return text.length >= minChars && wordCount >= minWords && hasLetters && isMostlyAlphaNumeric;
 }
 
 async function extractTextWithLens(imageUrl) {
@@ -104,7 +67,8 @@ async function loginToPinterest() {
   try {
     browser = await chromium.launch({
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+      timeout: 20000, // Don't let browser launch hang forever
     });
     const context = await browser.newContext({
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
@@ -187,12 +151,6 @@ function buildFreshQuery(query) {
   // We use the user's query as the niche, then append a real word that
   // Pinterest actually has results for - plus a rotating timestamp.
 
-  // If query is Arabic, don't append English words — just use a counter
-  if (containsArabic(query)) {
-    searchCounter++;
-    return `${query} ${searchCounter}`;
-  }
-
   // Pick a word different from the last one
   let idx;
   do {
@@ -227,7 +185,8 @@ async function searchPinterest(query, limit = 10, bookmark = null) {
     try {
       browser = await chromium.launch({
         headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+        timeout: 20000,
       });
 
       const context = await browser.newContext({
@@ -366,6 +325,7 @@ app.get('/api/pinterest/download', async (req, res) => {
     const imageUrl = req.query.url;
     if (!imageUrl) return res.status(400).json({ success: false, error: 'Missing ?url=' });
 
+    const https = require('https');
     https.get(imageUrl, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -433,12 +393,8 @@ app.get('/api/pinterest/search-with-ocr', async (req, res) => {
 
     console.log(`🔍 Searching with OCR: "${query}" (count: ${count})`);
 
-    // Detect query language — Arabic or English
-    const targetLang = detectQueryLanguage(query);
-    console.log(`🌐 Query language detected: ${targetLang}`);
-
     let attempts = 0;
-    const maxAttempts = 10; // Try more times to find language-matching pins
+    const maxAttempts = 5; // Try to find a meaningful image up to 5 times
     let meaningfulPins = [];
 
     while (meaningfulPins.length < count && attempts < maxAttempts) {
@@ -463,21 +419,17 @@ app.get('/api/pinterest/search-with-ocr', async (req, res) => {
         const ocrResult = await extractTextWithLens(imgUrl);
         const extractedText = ocrResult.text;
 
-        if (checkIfMeaningful(extractedText, targetLang)) {
-          console.log(`✅ [${targetLang}] Pin ${pin.id}: ${extractedText.substring(0, 60)}...`);
+        if (checkIfMeaningful(extractedText)) {
+          console.log(`✅ Meaningful text found for pin ${pin.id}: ${extractedText.substring(0, 50)}...`);
           meaningfulPins.push({
             ...pin,
             image: imgUrl,
             extractedText: extractedText,
             language: ocrResult.language,
-            langMatch: targetLang,
             lenstext_full: extractedText, // For n8n output requirement
           });
         } else {
-          const reason = extractedText.length >= 20
-            ? `lang mismatch (need ${targetLang})`
-            : 'text too short';
-          console.log(`❌ ${reason} for pin ${pin.id}: "${extractedText.substring(0, 40)}..." Re-searching...`);
+          console.log(`❌ Text not meaningful for pin ${pin.id}: ${extractedText.substring(0, 50)}... Re-searching...`);
         }
       }
       // Update bookmark for next iteration if needed
@@ -524,13 +476,17 @@ app.get('/', (req, res) => {
 // Start
 // ──────────────────────────────────────────────
 
-app.listen(PORT, async () => {
+app.listen(PORT, () => {
   console.log(`\n╔════════════════════════════════╗`);
   console.log(`║  Pinterest API Server Active   ║`);
   console.log(`║  Port: ${PORT}                      ║`);
   console.log(`╚════════════════════════════════╝\n`);
   if (PINTEREST_EMAIL && PINTEREST_PASSWORD) {
-    await loginToPinterest();
+    // Run login in background — don't block the first response
+    // Render's health check needs an immediate 200
+    loginToPinterest().catch(err => {
+      console.error('Background login failed (non-fatal):', err.message?.substring(0, 100));
+    });
   } else {
     console.log('⚠️  Pinterest credentials not configured.');
     console.log('   Search needs these to return results.');
